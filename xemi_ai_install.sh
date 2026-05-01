@@ -1,12 +1,14 @@
 #!/bin/bash
 
 set -euo pipefail
+umask 027
 
 APP_NAME="AI Node Manager Pro"
 STATE_DIR="/var/lib/xemi-ai"
 CONFIG_DIR="/etc/xemi-ai"
 BACKUP_DIR="${STATE_DIR}/backups"
 MANIFEST_FILE="${STATE_DIR}/manifest.env"
+LOCK_FILE="${STATE_DIR}/install.lock"
 LOG_DIR="/var/log/xemi-ai"
 LOG_FILE="${LOG_FILE:-${LOG_DIR}/install.log}"
 
@@ -28,6 +30,8 @@ PY311_BIN="/usr/bin/python3.11"
 OPENWEBUI_REF="${OPENWEBUI_REF:-}"
 ALLOW_CPU_FALLBACK="${ALLOW_CPU_FALLBACK:-0}"
 OLLAMA_VERSION="${OLLAMA_VERSION:-}"
+OLLAMA_BIND_HOST="${OLLAMA_BIND_HOST:-0.0.0.0}"
+OLLAMA_INSTALL_SHA256="${OLLAMA_INSTALL_SHA256:-}"
 ASSUME_YES=0
 DRY_RUN=0
 COMMAND="menu"
@@ -56,7 +60,7 @@ cmd_exists() { command -v "$1" >/dev/null 2>&1; }
 
 header() {
   if [ "$ASSUME_YES" != "1" ]; then
-    clear
+    clear || true
   fi
   echo -e "${BLUE}==================================================${NC}"
   echo -e "${BLUE} ${APP_NAME}${NC}"
@@ -108,7 +112,22 @@ confirm_proceed() {
 init_runtime() {
   mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$BACKUP_DIR" "$LOG_DIR"
   touch "$MANIFEST_FILE" "$LOG_FILE"
+  chmod 700 "$STATE_DIR" "$BACKUP_DIR" "$LOG_DIR" || true
+  chmod 750 "$CONFIG_DIR" || true
   chmod 600 "$MANIFEST_FILE" || true
+}
+
+acquire_lock() {
+  if ! cmd_exists flock; then
+    warn "flock not found; continuing without single-run lock."
+    return 0
+  fi
+
+  exec 9>"$LOCK_FILE"
+  if ! flock -n 9; then
+    fail "Another installer run is already active. Lock: $LOCK_FILE"
+    exit 1
+  fi
 }
 
 is_yes() {
@@ -119,8 +138,12 @@ record_manifest() {
   local key="$1"
   local value="$2"
   local tmp
+  if ! validate_manifest_key "$key" || ! manifest_key_allowed "$key"; then
+    fail "Refusing to write unsupported manifest key: $key"
+    return 1
+  fi
   mkdir -p "$STATE_DIR"
-  tmp="$(mktemp)"
+  tmp="$(mktemp "${STATE_DIR}/manifest.XXXXXX")"
   if [ -f "$MANIFEST_FILE" ]; then
     grep -v "^${key}=" "$MANIFEST_FILE" > "$tmp" || true
   fi
@@ -129,28 +152,75 @@ record_manifest() {
   chmod 600 "$MANIFEST_FILE" || true
 }
 
+validate_manifest_key() {
+  [[ "${1:-}" =~ ^[A-Z0-9_]+$ ]]
+}
+
+manifest_key_allowed() {
+  case "$1" in
+    AI_GROUP_CREATED|AI_USER_CREATED|AI_USER|AI_GROUP|OLLAMA_VERSION|OLLAMA_INSTALL_SHA256|OLLAMA_INSTALLED_BY_XEMI|OLLAMA_OVERRIDE_CREATED|OLLAMA_PORT|OLLAMA_BIND_HOST|NVIDIA_GPU_UUIDS|OPENWEBUI_VENV_CREATED|OPENWEBUI_SERVICE_CREATED|OPENWEBUI_PORT|OPENWEBUI_VENV|OPENWEBUI_DATA_DIR|OPENWEBUI_ENV_FILE|OPENWEBUI_PACKAGE|OPENWEBUI_OLLAMA_BASE_URL|FIREWALL_CONFIGURED|FIREWALL_RULE_OLLAMA|FIREWALL_RULE_WEBUI|LAN_SUBNET)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+decode_manifest_value() {
+  local raw="$1"
+  printf '%s\n' "$raw" | xargs printf '%s\n' 2>/dev/null
+}
+
 load_manifest() {
-  if [ -f "$MANIFEST_FILE" ]; then
-    # shellcheck disable=SC1090
-    source "$MANIFEST_FILE"
-  fi
+  local line key raw value
+  [ -f "$MANIFEST_FILE" ] || return 0
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    [[ "$line" = \#* ]] && continue
+    key="${line%%=*}"
+    raw="${line#*=}"
+    if ! validate_manifest_key "$key" || ! manifest_key_allowed "$key"; then
+      warn "Ignoring unsupported manifest key: $key"
+      continue
+    fi
+    if ! value="$(decode_manifest_value "$raw")"; then
+      warn "Ignoring malformed manifest value for key: $key"
+      continue
+    fi
+    printf -v "$key" "%s" "$value"
+  done < "$MANIFEST_FILE"
 }
 
 run_required() {
   local desc="$1"
+  local rc
   shift
   echo "$desc"
   log "RUN , $desc , $*"
-  "$@"
+  set +e
+  "$@" 2>&1 | tee -a "$LOG_FILE"
+  rc=${PIPESTATUS[0]}
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    fail "Required step failed (${rc}): $desc"
+    return "$rc"
+  fi
 }
 
 run_optional() {
   local desc="$1"
+  local rc
   shift
   echo "$desc"
   log "RUN_OPTIONAL , $desc , $*"
-  if ! "$@"; then
-    warn "Optional step failed: $desc"
+  set +e
+  "$@" 2>&1 | tee -a "$LOG_FILE"
+  rc=${PIPESTATUS[0]}
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    warn "Optional step failed (${rc}): $desc"
     return 1
   fi
 }
@@ -187,6 +257,7 @@ show_dry_run_plan() {
   echo "  Ollama port: ${OLLAMA_PORT_DEFAULT}"
   echo "  Open WebUI port: ${WEBUI_PORT_DEFAULT}"
   echo "  LAN subnet: ${LAN_SUBNET_DEFAULT}"
+  echo "  Ollama bind host: ${OLLAMA_BIND_HOST}"
   echo "  Open WebUI package: ${OPENWEBUI_PACKAGE}"
   echo "  Python binary for Open WebUI: ${PY311_BIN}"
   echo "  Allow CPU fallback: ${ALLOW_CPU_FALLBACK}"
@@ -195,6 +266,11 @@ show_dry_run_plan() {
     echo "  Ollama version: ${OLLAMA_VERSION}"
   else
     echo "  Ollama version: latest official installer default"
+  fi
+  if [ -n "$OLLAMA_INSTALL_SHA256" ]; then
+    echo "  Ollama installer SHA256 verification: enabled"
+  else
+    echo "  Ollama installer SHA256 verification: not configured"
   fi
   echo ""
 
@@ -271,6 +347,71 @@ validate_cidr() {
     [ "$o" -ge 0 ] && [ "$o" -le 255 ] || return 1
   done
   [ "$prefix" -ge 0 ] && [ "$prefix" -le 32 ]
+}
+
+validate_bind_host() {
+  [[ "${1:-}" =~ ^[A-Za-z0-9_.:-]+$ ]]
+}
+
+validate_sha256() {
+  [[ "${1:-}" =~ ^[A-Fa-f0-9]{64}$ ]]
+}
+
+validate_runtime_config() {
+  validate_bind_host "$OLLAMA_BIND_HOST" || { echo "Invalid OLLAMA_BIND_HOST: $OLLAMA_BIND_HOST"; exit 1; }
+  if [ -n "$OLLAMA_INSTALL_SHA256" ]; then
+    validate_sha256 "$OLLAMA_INSTALL_SHA256" || { echo "Invalid OLLAMA_INSTALL_SHA256: $OLLAMA_INSTALL_SHA256"; exit 1; }
+  fi
+}
+
+safe_rm_rf() {
+  local path="$1"
+  shift
+  local resolved prefix resolved_prefix
+
+  if [ -z "$path" ] || [ "$path" = "/" ] || [ "$path" = "." ] || [ "$path" = ".." ]; then
+    fail "Refusing unsafe rm -rf path: ${path:-<empty>}"
+    return 1
+  fi
+  if ! cmd_exists realpath; then
+    fail "realpath is required for safe directory removal."
+    return 1
+  fi
+
+  resolved="$(realpath -m -- "$path")"
+  for prefix in "$@"; do
+    resolved_prefix="$(realpath -m -- "$prefix")"
+    if [ "$resolved" = "$resolved_prefix" ] || [[ "$resolved" = "$resolved_prefix"/* ]]; then
+      rm -rf -- "$resolved"
+      return 0
+    fi
+  done
+
+  fail "Refusing rm -rf outside managed paths: $path"
+  return 1
+}
+
+rpmfusion_release_urls() {
+  local fedora_ver=""
+  local rhel_ver=""
+
+  fedora_ver="$(rpm -E %fedora 2>/dev/null || true)"
+  if [[ "$fedora_ver" =~ ^[0-9]+$ ]]; then
+    printf "%s\n" \
+      "https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-${fedora_ver}.noarch.rpm" \
+      "https://download1.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${fedora_ver}.noarch.rpm"
+    return 0
+  fi
+
+  rhel_ver="$(rpm -E %rhel 2>/dev/null || true)"
+  if [[ "$rhel_ver" =~ ^[0-9]+$ ]]; then
+    printf "%s\n" \
+      "https://download1.rpmfusion.org/free/el/rpmfusion-free-release-${rhel_ver}.noarch.rpm" \
+      "https://download1.rpmfusion.org/nonfree/el/rpmfusion-nonfree-release-${rhel_ver}.noarch.rpm"
+    return 0
+  fi
+
+  return 1
 }
 
 ask_port() {
@@ -371,9 +512,20 @@ ensure_ai_user() {
 enable_repos() {
   header
   echo "Enabling repositories..."
-  run_required "Installing EPEL release..." dnf install -y epel-release
-  run_required "Installing RPM Fusion free release..." dnf install -y https://download1.rpmfusion.org/free/el/rpmfusion-free-release-9.noarch.rpm
-  run_required "Installing RPM Fusion nonfree release..." dnf install -y https://download1.rpmfusion.org/nonfree/el/rpmfusion-nonfree-release-9.noarch.rpm
+  local rpmfusion_urls=()
+  mapfile -t rpmfusion_urls < <(rpmfusion_release_urls)
+  if [ "${#rpmfusion_urls[@]}" -ne 2 ]; then
+    fail "Could not determine Fedora/RHEL release version for RPM Fusion."
+    pause
+    return 1
+  fi
+  if [[ "$(rpm -E %rhel 2>/dev/null || true)" =~ ^[0-9]+$ ]]; then
+    run_required "Installing EPEL release..." dnf install -y epel-release
+  else
+    warn "Skipping EPEL release package on non-RHEL platform."
+  fi
+  run_required "Installing RPM Fusion free release..." dnf install -y "${rpmfusion_urls[0]}"
+  run_required "Installing RPM Fusion nonfree release..." dnf install -y "${rpmfusion_urls[1]}"
   ok "Repositories ready."
   pause
 }
@@ -544,6 +696,17 @@ install_ollama_official() {
   installer="$(mktemp /tmp/ollama-install.XXXXXX.sh)"
   echo "Installing Ollama using official installer..."
   run_required "Downloading Ollama official installer..." curl -fsSL -o "$installer" https://ollama.com/install.sh
+  if [ -n "$OLLAMA_INSTALL_SHA256" ]; then
+    validate_sha256 "$OLLAMA_INSTALL_SHA256" || {
+      fail "Invalid OLLAMA_INSTALL_SHA256. Expected 64 hexadecimal characters."
+      return 1
+    }
+    printf "%s  %s\n" "$OLLAMA_INSTALL_SHA256" "$installer" | sha256sum -c -
+    record_manifest "OLLAMA_INSTALL_SHA256" "$OLLAMA_INSTALL_SHA256"
+    ok "Ollama installer checksum verified."
+  else
+    warn "Ollama installer checksum not configured; relying on HTTPS transport."
+  fi
   chmod 700 "$installer"
   if [ -n "$OLLAMA_VERSION" ]; then
     echo "Using Ollama version: $OLLAMA_VERSION"
@@ -562,8 +725,15 @@ install_ollama_official() {
 configure_ollama_service_lan() {
   header
   local port
+  local bind_host
   local gpu_uuids=""
   port="$(ask_port "Ollama port" "$OLLAMA_PORT_DEFAULT")"
+  bind_host="$(ask "Ollama bind host" "$OLLAMA_BIND_HOST")"
+  if ! validate_bind_host "$bind_host"; then
+    fail "Invalid Ollama bind host. Use an IP address or DNS-safe host name."
+    pause
+    return 1
+  fi
 
   ensure_ai_user
   if ensure_nvidia_gpu_ready; then
@@ -580,10 +750,16 @@ configure_ollama_service_lan() {
   mkdir -p /etc/systemd/system/ollama.service.d
   cat > /etc/systemd/system/ollama.service.d/override.conf <<EOF
 [Service]
-Environment="OLLAMA_HOST=0.0.0.0:${port}"
+Environment="OLLAMA_HOST=${bind_host}:${port}"
 Environment="OLLAMA_FLASH_ATTENTION=1"
 User=${AI_USER}
 Group=${AI_GROUP}
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
 EOF
   if [ -n "$gpu_uuids" ]; then
     cat >> /etc/systemd/system/ollama.service.d/override.conf <<EOF
@@ -594,12 +770,14 @@ EOF
 
   record_manifest "OLLAMA_OVERRIDE_CREATED" "1"
   record_manifest "OLLAMA_PORT" "$port"
+  record_manifest "OLLAMA_BIND_HOST" "$bind_host"
   OLLAMA_PORT="$port"
+  OLLAMA_BIND_HOST="$bind_host"
   systemctl daemon-reload
   systemctl enable ollama >/dev/null 2>&1
   systemctl restart ollama
 
-  ok "Ollama service configured for LAN on port ${port}."
+  ok "Ollama service configured on ${bind_host}:${port}."
   pause
 }
 
@@ -716,6 +894,10 @@ recommend_and_install_models() {
 
   local choice
   choice="$(ask "Selection number" "1")"
+  if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+    warn "Invalid selection. Using option 1."
+    choice=1
+  fi
   local idx=$((choice-1))
   if [ "$idx" -lt 0 ] || [ "$idx" -ge "${#options[@]}" ]; then
     idx=0
@@ -789,7 +971,11 @@ remove_ollama_by_location() {
   local c
   c="$(ask "Choose cleanup option" "1")"
   if [ "$c" = "2" ]; then
-    rm -rf "/usr/local/lib/ollama" "/usr/share/ollama" "/var/lib/ollama" "/home/${AI_USER}/.ollama" "/root/.ollama" || true
+    safe_rm_rf "/usr/local/lib/ollama" /usr/local/lib || true
+    safe_rm_rf "/usr/share/ollama" /usr/share || true
+    safe_rm_rf "/var/lib/ollama" /var/lib || true
+    safe_rm_rf "/home/${AI_USER}/.ollama" /home || true
+    safe_rm_rf "/root/.ollama" /root || true
     ok "Model data removed (best effort)."
   else
     ok "Model data kept."
@@ -799,7 +985,7 @@ remove_ollama_by_location() {
   echo "Removing service overrides and unit if present..."
   backup_path /etc/systemd/system/ollama.service.d
   backup_path /etc/systemd/system/ollama.service
-  rm -rf /etc/systemd/system/ollama.service.d || true
+  safe_rm_rf /etc/systemd/system/ollama.service.d /etc/systemd/system || true
   rm -f /etc/systemd/system/ollama.service || true
   systemctl daemon-reload || true
 
@@ -829,25 +1015,32 @@ install_openwebui() {
   ensure_ai_user
   ensure_base_tools
 
-  rm -rf "$OPENWEBUI_VENV"
-  "$PY311_BIN" -m venv "$OPENWEBUI_VENV"
+  if [ -d "$OPENWEBUI_VENV" ]; then
+    safe_rm_rf "$OPENWEBUI_VENV" /opt
+  fi
+  run_required "Creating Open WebUI virtual environment..." "$PY311_BIN" -m venv "$OPENWEBUI_VENV"
   record_manifest "OPENWEBUI_VENV_CREATED" "1"
 
-  "$OPENWEBUI_VENV/bin/pip" install --upgrade pip
-  "$OPENWEBUI_VENV/bin/pip" install -U "$OPENWEBUI_PACKAGE"
+  run_required "Upgrading pip in Open WebUI venv..." "$OPENWEBUI_VENV/bin/pip" install --upgrade pip
+  run_required "Installing Open WebUI package..." "$OPENWEBUI_VENV/bin/pip" install -U "$OPENWEBUI_PACKAGE"
 
   mkdir -p "$OPENWEBUI_DATA_DIR"
   chown -R "$AI_USER:$AI_GROUP" "$OPENWEBUI_DATA_DIR" "$OPENWEBUI_VENV"
 
   load_manifest
   local ollama_port="${OLLAMA_PORT:-$OLLAMA_PORT_DEFAULT}"
+  local ollama_host="${OLLAMA_BIND_HOST:-0.0.0.0}"
+  local ollama_base_host="127.0.0.1"
   local webui_port
+  if [ "$ollama_host" != "0.0.0.0" ]; then
+    ollama_base_host="$ollama_host"
+  fi
   webui_port="$(ask_port "WebUI port" "$WEBUI_PORT_DEFAULT")"
 
   cat > "$OPENWEBUI_ENV_FILE" <<EOF
 PORT=${webui_port}
 DATA_DIR=${OPENWEBUI_DATA_DIR}
-OLLAMA_BASE_URL=http://127.0.0.1:${ollama_port}
+OLLAMA_BASE_URL=http://${ollama_base_host}:${ollama_port}
 UVICORN_WORKERS=1
 EOF
   chmod 640 "$OPENWEBUI_ENV_FILE"
@@ -868,6 +1061,11 @@ User=${AI_USER}
 Group=${AI_GROUP}
 Restart=always
 RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=${OPENWEBUI_DATA_DIR}
 
 [Install]
 WantedBy=multi-user.target
@@ -879,7 +1077,7 @@ EOF
   record_manifest "OPENWEBUI_DATA_DIR" "$OPENWEBUI_DATA_DIR"
   record_manifest "OPENWEBUI_ENV_FILE" "$OPENWEBUI_ENV_FILE"
   record_manifest "OPENWEBUI_PACKAGE" "$OPENWEBUI_PACKAGE"
-  record_manifest "OPENWEBUI_OLLAMA_BASE_URL" "http://127.0.0.1:${ollama_port}"
+  record_manifest "OPENWEBUI_OLLAMA_BASE_URL" "http://${ollama_base_host}:${ollama_port}"
   OPENWEBUI_PORT="$webui_port"
   systemctl daemon-reload
   systemctl enable openwebui >/dev/null 2>&1
@@ -986,7 +1184,7 @@ remove_openwebui_installation() {
   fi
 
   if [ -d "$venv" ]; then
-    rm -rf "$venv"
+    safe_rm_rf "$venv" /opt
     ok "Open WebUI venv removed: $venv"
   fi
 
@@ -998,7 +1196,7 @@ remove_openwebui_installation() {
 
   if [ "$purge" = "1" ] && [ -d "$data_dir" ]; then
     backup_path "$data_dir"
-    rm -rf "$data_dir"
+    safe_rm_rf "$data_dir" /var/lib
     ok "Open WebUI data removed: $data_dir"
   elif [ -d "$data_dir" ]; then
     warn "Open WebUI data kept: $data_dir"
@@ -1006,7 +1204,7 @@ remove_openwebui_installation() {
 
   if [ "$purge" = "1" ] && [ -d "$legacy_dir" ]; then
     backup_path "$legacy_dir"
-    rm -rf "$legacy_dir"
+    safe_rm_rf "$legacy_dir" /opt
     ok "Legacy Open WebUI source directory removed: $legacy_dir"
   fi
 }
@@ -1033,7 +1231,11 @@ remove_ollama_installation() {
 
     backup_path /etc/systemd/system/ollama.service
     rm -f /etc/systemd/system/ollama.service
-    rm -rf /usr/local/lib/ollama /usr/share/ollama /var/lib/ollama "/home/${AI_USER}/.ollama" /root/.ollama
+    safe_rm_rf /usr/local/lib/ollama /usr/local/lib
+    safe_rm_rf /usr/share/ollama /usr/share
+    safe_rm_rf /var/lib/ollama /var/lib
+    safe_rm_rf "/home/${AI_USER}/.ollama" /home
+    safe_rm_rf /root/.ollama /root
     ok "Ollama service, libraries and model data removed."
   else
     warn "Ollama binary and model data kept."
@@ -1095,7 +1297,7 @@ uninstall_stack() {
     remove_ai_identity_if_created
     backup_path "$MANIFEST_FILE"
     rm -f "$MANIFEST_FILE"
-    rm -rf "$CONFIG_DIR"
+    safe_rm_rf "$CONFIG_DIR" /etc/xemi-ai
     ok "Purge completed."
   else
     ok "Uninstall completed."
@@ -1429,10 +1631,12 @@ Options:
   --ollama-port PORT           Set Ollama port (default: ${OLLAMA_PORT_DEFAULT})
   --webui-port PORT            Set Open WebUI port (default: ${WEBUI_PORT_DEFAULT})
   --lan CIDR                   Set allowed LAN subnet (default: ${LAN_SUBNET_DEFAULT})
+  --ollama-bind-host HOST      Set Ollama bind host (default: ${OLLAMA_BIND_HOST})
   --ai-user USER               Set service user (default: ${AI_USER})
   --ai-group GROUP             Set service group (default: ${AI_GROUP})
   --openwebui-package PACKAGE  Set pip package, for example open-webui==0.7.2
   --ollama-version VERSION     Set OLLAMA_VERSION for the official installer
+  --ollama-install-sha256 SUM  Verify downloaded Ollama installer script
   --allow-cpu-fallback         Allow install without confirmed NVIDIA GPU
   --reboot                     Allow automatic reboot after driver install
   -h, --help                   Show this help
@@ -1476,6 +1680,12 @@ parse_args() {
         LAN_SUBNET_DEFAULT="$2"
         shift 2
         ;;
+      --ollama-bind-host)
+        [ "$#" -ge 2 ] || { echo "Missing value for --ollama-bind-host"; exit 1; }
+        validate_bind_host "$2" || { echo "Invalid --ollama-bind-host: $2"; exit 1; }
+        OLLAMA_BIND_HOST="$2"
+        shift 2
+        ;;
       --ai-user)
         [ "$#" -ge 2 ] || { echo "Missing value for --ai-user"; exit 1; }
         validate_identity "$2" || { echo "Invalid --ai-user: $2"; exit 1; }
@@ -1496,6 +1706,12 @@ parse_args() {
       --ollama-version)
         [ "$#" -ge 2 ] || { echo "Missing value for --ollama-version"; exit 1; }
         OLLAMA_VERSION="$2"
+        shift 2
+        ;;
+      --ollama-install-sha256)
+        [ "$#" -ge 2 ] || { echo "Missing value for --ollama-install-sha256"; exit 1; }
+        validate_sha256 "$2" || { echo "Invalid --ollama-install-sha256: $2"; exit 1; }
+        OLLAMA_INSTALL_SHA256="$2"
         shift 2
         ;;
       --allow-cpu-fallback)
@@ -1531,6 +1747,8 @@ main() {
     return 0
   fi
 
+  validate_runtime_config
+
   if [ "$DRY_RUN" = "1" ]; then
     show_dry_run_plan "$COMMAND"
     return 0
@@ -1538,6 +1756,7 @@ main() {
 
   require_root
   init_runtime
+  acquire_lock
 
   case "$COMMAND" in
     menu) menu ;;

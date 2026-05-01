@@ -14,11 +14,13 @@ The full installer can prepare a new server end to end:
 - Installs Ollama using the official Ollama Linux installer.
 - Configures Ollama as a systemd service with LAN binding and autostart.
 - Configures Ollama GPU-related environment variables when NVIDIA GPUs are detected.
+- Adds basic systemd hardening for the managed Ollama override and Open WebUI service.
 - Pulls recommended models based on detected VRAM.
 - Installs Open WebUI as the official Python package inside a dedicated Python 3.11 virtual environment.
 - Creates an Open WebUI systemd service with autostart.
 - Creates LAN-only `firewalld` rich rules for Ollama and Open WebUI.
 - Writes an installation manifest so uninstall and purge can remove what was created.
+- Uses a single-run lock to prevent concurrent installer runs from changing the same state.
 - Provides a `doctor` command to verify readiness after installation or reboot.
 
 ## Supported Systems
@@ -38,9 +40,71 @@ Typical targets are:
 
 The installer checks for `dnf` and `systemctl` before running installation flows. If your system uses `apt`, `apk`, `zypper`, or another package manager, this installer is not currently intended for that environment.
 
+## Download From GitHub
+
+On a fresh supported server, install the small tools needed to download the repository first:
+
+```bash
+sudo dnf install -y git curl ca-certificates
+```
+
+Clone the repository into `/usr/local/xemi-ai-installer`:
+
+```bash
+sudo git clone https://github.com/Vgarcan/xemi-ai-installer.git /usr/local/xemi-ai-installer
+```
+
+Make the installer executable and create the compatibility command:
+
+```bash
+sudo chmod +x /usr/local/xemi-ai-installer/xemi_ai_install.sh
+sudo ln -sf /usr/local/xemi-ai-installer/xemi_ai_install.sh /usr/local/bin/xemi_ai_install.sh
+```
+
+Run a dry run before changing the server:
+
+```bash
+sudo /usr/local/bin/xemi_ai_install.sh install --dry-run
+```
+
+Then run the full installer:
+
+```bash
+sudo /usr/local/bin/xemi_ai_install.sh install
+```
+
+To update an existing clone later:
+
+```bash
+cd /usr/local/xemi-ai-installer
+sudo git pull --ff-only
+sudo chmod +x xemi_ai_install.sh
+```
+
+### Download Without Git
+
+If you prefer not to clone the repository, install `curl` and download the files directly from GitHub:
+
+```bash
+sudo dnf install -y curl ca-certificates
+sudo mkdir -p /usr/local/xemi-ai-installer
+sudo curl -fsSL -o /usr/local/xemi-ai-installer/xemi_ai_install.sh \
+  https://raw.githubusercontent.com/Vgarcan/xemi-ai-installer/main/xemi_ai_install.sh
+sudo curl -fsSL -o /usr/local/xemi-ai-installer/README.md \
+  https://raw.githubusercontent.com/Vgarcan/xemi-ai-installer/main/README.md
+sudo chmod +x /usr/local/xemi-ai-installer/xemi_ai_install.sh
+sudo ln -sf /usr/local/xemi-ai-installer/xemi_ai_install.sh /usr/local/bin/xemi_ai_install.sh
+```
+
+After downloading without Git, run:
+
+```bash
+sudo /usr/local/bin/xemi_ai_install.sh install --dry-run
+```
+
 ## Quick Start
 
-Run the full new-server setup as root:
+After downloading the repository, run the full new-server setup as root:
 
 ```bash
 sudo /usr/local/bin/xemi_ai_install.sh install
@@ -107,6 +171,7 @@ sudo /usr/local/bin/xemi_ai_install.sh install --dry-run \
   --ollama-port 11434 \
   --webui-port 3000 \
   --lan 192.168.2.0/24 \
+  --ollama-bind-host 0.0.0.0 \
   --openwebui-package open-webui \
   --ollama-version 0.5.7
 ```
@@ -213,10 +278,12 @@ Supported options:
 --ollama-port PORT           Set the Ollama port.
 --webui-port PORT            Set the Open WebUI port.
 --lan CIDR                   Set the LAN subnet allowed by firewalld.
+--ollama-bind-host HOST      Set the Ollama bind host.
 --ai-user USER               Set the service user.
 --ai-group GROUP             Set the service group.
 --openwebui-package PACKAGE  Set the pip package, for example open-webui==0.7.2.
 --ollama-version VERSION     Set OLLAMA_VERSION for the official Ollama installer.
+--ollama-install-sha256 SUM  Verify the downloaded Ollama installer script.
 --allow-cpu-fallback         Allow installation without confirmed NVIDIA GPU.
 --reboot                     Allow automatic reboot after driver installation in --yes mode.
 -h, --help                   Show help.
@@ -239,6 +306,15 @@ You can pin Ollama:
 sudo /usr/local/bin/xemi_ai_install.sh install \
   --ollama-version 0.5.7
 ```
+
+You can also verify the downloaded Ollama installer script when you have a trusted SHA256 digest:
+
+```bash
+sudo /usr/local/bin/xemi_ai_install.sh install \
+  --ollama-install-sha256 <64-character-sha256>
+```
+
+If no installer checksum is provided, the script warns and relies on HTTPS transport for the official Ollama installer.
 
 You can combine both:
 
@@ -338,6 +414,15 @@ sudo LAN_SUBNET=192.168.1.0/24 /usr/local/bin/xemi_ai_install.sh install
 ```
 
 Firewall rules are stored in the installer manifest so they can be removed later by `uninstall` or `purge`.
+
+Ollama binds to `0.0.0.0` by default so LAN clients can reach it through the firewall rules. To bind it differently:
+
+```bash
+sudo /usr/local/bin/xemi_ai_install.sh install \
+  --ollama-bind-host 127.0.0.1
+```
+
+If you bind Ollama to localhost only, LAN clients will not be able to reach the Ollama API directly.
 
 ## Users And Permissions
 
@@ -647,4 +732,6 @@ sudo /usr/local/bin/xemi_ai_install.sh install --openwebui-package open-webui==0
 - It does not replace or modify the operating system's default Python.
 - It uses systemd services so Ollama and Open WebUI survive reboot.
 - It records installer-created resources in a manifest for safer cleanup.
+- It loads only supported manifest keys instead of sourcing arbitrary manifest contents.
+- It refuses recursive deletion outside the managed path prefixes used by the installer.
 - It is designed for `dnf` systems. Other Linux families need a dedicated package-management branch before they should be considered supported.
