@@ -31,6 +31,11 @@ OPENWEBUI_REF="${OPENWEBUI_REF:-}"
 ALLOW_CPU_FALLBACK="${ALLOW_CPU_FALLBACK:-0}"
 OLLAMA_VERSION="${OLLAMA_VERSION:-}"
 OLLAMA_BIND_HOST="${OLLAMA_BIND_HOST:-0.0.0.0}"
+OLLAMA_MODELS_DIR="${OLLAMA_MODELS_DIR:-}"
+OLLAMA_MODELS_DIR_FROM_CLI=0
+if [ -n "$OLLAMA_MODELS_DIR" ]; then
+  OLLAMA_MODELS_DIR_FROM_CLI=1
+fi
 OLLAMA_INSTALL_SHA256="${OLLAMA_INSTALL_SHA256:-}"
 ASSUME_YES=0
 DRY_RUN=0
@@ -82,6 +87,16 @@ ok() { echo -e "${GREEN}$1${NC}"; log "OK , $1"; }
 warn() { echo -e "${YELLOW}$1${NC}"; log "WARN , $1"; }
 fail() { echo -e "${RED}$1${NC}"; log "ERROR , $1"; }
 
+menu_section() {
+  echo -e "${BLUE}-- $1 --${NC}"
+}
+
+menu_item() {
+  local number="$1"
+  local text="$2"
+  printf "  ${GREEN}%2s${NC}) %s\n" "$number" "$text"
+}
+
 ask() {
   local prompt="$1"
   local default="${2:-}"
@@ -128,6 +143,7 @@ acquire_lock() {
     fail "Another installer run is already active. Lock: $LOCK_FILE"
     exit 1
   fi
+  trap 'flock -u 9 2>/dev/null || true' EXIT
 }
 
 is_yes() {
@@ -148,7 +164,7 @@ record_manifest() {
     grep -v "^${key}=" "$MANIFEST_FILE" > "$tmp" || true
   fi
   printf "%s=%q\n" "$key" "$value" >> "$tmp"
-  mv "$tmp" "$MANIFEST_FILE"
+  command mv -f "$tmp" "$MANIFEST_FILE"
   chmod 600 "$MANIFEST_FILE" || true
 }
 
@@ -158,7 +174,7 @@ validate_manifest_key() {
 
 manifest_key_allowed() {
   case "$1" in
-    AI_GROUP_CREATED|AI_USER_CREATED|AI_USER|AI_GROUP|OLLAMA_VERSION|OLLAMA_INSTALL_SHA256|OLLAMA_INSTALLED_BY_XEMI|OLLAMA_OVERRIDE_CREATED|OLLAMA_PORT|OLLAMA_BIND_HOST|NVIDIA_GPU_UUIDS|OPENWEBUI_VENV_CREATED|OPENWEBUI_SERVICE_CREATED|OPENWEBUI_PORT|OPENWEBUI_VENV|OPENWEBUI_DATA_DIR|OPENWEBUI_ENV_FILE|OPENWEBUI_PACKAGE|OPENWEBUI_OLLAMA_BASE_URL|FIREWALL_CONFIGURED|FIREWALL_RULE_OLLAMA|FIREWALL_RULE_WEBUI|LAN_SUBNET)
+    AI_GROUP_CREATED|AI_USER_CREATED|AI_USER|AI_GROUP|OLLAMA_VERSION|OLLAMA_INSTALL_SHA256|OLLAMA_INSTALLED_BY_XEMI|OLLAMA_OVERRIDE_CREATED|OLLAMA_PORT|OLLAMA_BIND_HOST|OLLAMA_MODELS_DIR|NVIDIA_GPU_UUIDS|OPENWEBUI_VENV_CREATED|OPENWEBUI_SERVICE_CREATED|OPENWEBUI_PORT|OPENWEBUI_VENV|OPENWEBUI_DATA_DIR|OPENWEBUI_ENV_FILE|OPENWEBUI_PACKAGE|OPENWEBUI_OLLAMA_BASE_URL|FIREWALL_CONFIGURED|FIREWALL_RULE_OLLAMA|FIREWALL_RULE_WEBUI|LAN_SUBNET)
       return 0
       ;;
     *)
@@ -258,6 +274,11 @@ show_dry_run_plan() {
   echo "  Open WebUI port: ${WEBUI_PORT_DEFAULT}"
   echo "  LAN subnet: ${LAN_SUBNET_DEFAULT}"
   echo "  Ollama bind host: ${OLLAMA_BIND_HOST}"
+  if [ -n "$OLLAMA_MODELS_DIR" ]; then
+    echo "  Ollama models directory: ${OLLAMA_MODELS_DIR}"
+  else
+    echo "  Ollama models directory: Ollama default/service-user default"
+  fi
   echo "  Open WebUI package: ${OPENWEBUI_PACKAGE}"
   echo "  Python binary for Open WebUI: ${PY311_BIN}"
   echo "  Allow CPU fallback: ${ALLOW_CPU_FALLBACK}"
@@ -284,20 +305,38 @@ show_dry_run_plan() {
       echo "  5. Install NVIDIA drivers if needed."
       echo "  6. Install Ollama."
       echo "  7. Configure Ollama systemd override for LAN/GPU/autostart."
-      echo "  8. Pull recommended models."
-      echo "  9. Install Python 3.11 side-by-side and Open WebUI in a venv."
-      echo "  10. Create Open WebUI systemd service with autostart."
-      echo "  11. Add firewall rich rules for LAN access."
-      echo "  12. Run doctor readiness checks."
+      echo "  8. Configure custom Ollama model directory if provided."
+      echo "  9. Offer model sets and optionally pull selected models."
+      echo "  10. Install Python 3.11 side-by-side and Open WebUI in a venv."
+      echo "  11. Create Open WebUI systemd service with autostart."
+      echo "  12. Add firewall rich rules for LAN access."
+      echo "  13. Run doctor readiness checks."
       ;;
     stack)
       echo "Plan:"
       echo "  1. Check dnf/systemd support."
       echo "  2. Install base tools and user."
       echo "  3. Install/configure Ollama."
-      echo "  4. Pull models."
-      echo "  5. Install/configure Open WebUI."
-      echo "  6. Configure firewall and run doctor."
+      echo "  4. Configure custom Ollama model directory if provided."
+      echo "  5. Offer model sets and optionally pull selected models."
+      echo "  6. Install/configure Open WebUI."
+      echo "  7. Configure firewall and run doctor."
+      ;;
+    models-dir)
+      echo "Plan:"
+      echo "  1. Ask for or use --ollama-models-dir."
+      echo "  2. Create/chown the target directory."
+      echo "  3. Optionally migrate existing model data."
+      echo "  4. Update Ollama systemd override with OLLAMA_MODELS."
+      echo "  5. Restart Ollama and verify /api/tags."
+      ;;
+    openwebui-update|webui-update)
+      echo "Plan:"
+      echo "  1. Check current Open WebUI version in the venv."
+      echo "  2. Ask pip whether open-webui has an available update."
+      echo "  3. If update exists, stop Open WebUI and upgrade the package."
+      echo "  4. Reapply SQLite/cache/systemd compatibility settings."
+      echo "  5. Restart Open WebUI and verify /health."
       ;;
     drivers)
       echo "Plan:"
@@ -319,7 +358,7 @@ show_dry_run_plan() {
       echo "  3. Remove Ollama binary/libraries/model data."
       echo "  4. Remove created user/group and manifest."
       ;;
-    doctor|status|state|menu)
+    doctor|status|state|report|info|menu)
       echo "Plan: run read-oriented command '${cmd}'."
       ;;
     *)
@@ -353,6 +392,15 @@ validate_bind_host() {
   [[ "${1:-}" =~ ^[A-Za-z0-9_.:-]+$ ]]
 }
 
+validate_absolute_path() {
+  local path="${1:-}"
+  [ -n "$path" ] || return 1
+  [[ "$path" = /* ]] || return 1
+  [ "$path" != "/" ] || return 1
+  [[ "$path" != *$'\n'* && "$path" != *$'\r'* ]] || return 1
+  [[ "$path" =~ ^/[A-Za-z0-9._/@+=:-]+$ ]]
+}
+
 validate_sha256() {
   [[ "${1:-}" =~ ^[A-Fa-f0-9]{64}$ ]]
 }
@@ -361,6 +409,9 @@ validate_runtime_config() {
   validate_bind_host "$OLLAMA_BIND_HOST" || { echo "Invalid OLLAMA_BIND_HOST: $OLLAMA_BIND_HOST"; exit 1; }
   if [ -n "$OLLAMA_INSTALL_SHA256" ]; then
     validate_sha256 "$OLLAMA_INSTALL_SHA256" || { echo "Invalid OLLAMA_INSTALL_SHA256: $OLLAMA_INSTALL_SHA256"; exit 1; }
+  fi
+  if [ -n "$OLLAMA_MODELS_DIR" ]; then
+    validate_absolute_path "$OLLAMA_MODELS_DIR" || { echo "Invalid OLLAMA_MODELS_DIR: $OLLAMA_MODELS_DIR"; exit 1; }
   fi
 }
 
@@ -442,6 +493,20 @@ ask_cidr() {
   done
 }
 
+ask_absolute_path() {
+  local prompt="$1"
+  local default="$2"
+  local value
+  while true; do
+    value="$(ask "$prompt" "$default")"
+    if validate_absolute_path "$value"; then
+      echo "$value"
+      return 0
+    fi
+    warn "Invalid path. Use an absolute path without spaces, for example /mnt/ssd/ollama-models."
+  done
+}
+
 backup_path() {
   local path="$1"
   local stamp dest
@@ -480,7 +545,8 @@ remove_firewall_rule() {
 ensure_base_tools() {
   header
   echo "Installing base tools..."
-  run_required "Installing base tools with dnf..." dnf install -y curl wget git firewalld htop nano tar gzip jq bc pciutils util-linux coreutils procps-ng
+  run_required "Installing base tools with dnf..." dnf install -y curl wget git firewalld nano tar gzip jq bc pciutils util-linux coreutils procps-ng
+  run_optional "Installing optional diagnostic tool htop..." dnf install -y htop || true
   run_optional "Enabling firewalld..." systemctl enable firewalld || true
   run_optional "Starting firewalld..." systemctl start firewalld || true
   ok "Base tools ready."
@@ -671,7 +737,7 @@ show_ollama_status_and_location() {
 
   echo ""
   echo "Service status:"
-  if systemctl list-unit-files | grep -q "^ollama\.service"; then
+  if [ "$(systemctl show ollama.service -p LoadState --value --no-pager 2>/dev/null || true)" = "loaded" ]; then
     systemctl status ollama --no-pager || true
     echo ""
     echo "Service environment:"
@@ -722,11 +788,67 @@ install_ollama_official() {
   pause
 }
 
+default_ollama_models_dir() {
+  echo "/home/${AI_USER}/.ollama/models"
+}
+
+current_ollama_models_dir() {
+  local env_line
+  if [ -n "${OLLAMA_MODELS_DIR:-}" ]; then
+    echo "$OLLAMA_MODELS_DIR"
+    return 0
+  fi
+  env_line="$(systemctl show ollama -p Environment --no-pager 2>/dev/null || true)"
+  if echo "$env_line" | tr ' ' '\n' | grep -q '^OLLAMA_MODELS='; then
+    echo "$env_line" | tr ' ' '\n' | awk -F= '/^OLLAMA_MODELS=/ {sub(/^OLLAMA_MODELS=/, ""); print; exit}'
+    return 0
+  fi
+  default_ollama_models_dir
+}
+
+write_ollama_override() {
+  local port="$1"
+  local bind_host="$2"
+  local gpu_uuids="$3"
+  local models_dir="${4:-}"
+
+  backup_path /etc/systemd/system/ollama.service.d
+  mkdir -p /etc/systemd/system/ollama.service.d
+  cat > /etc/systemd/system/ollama.service.d/override.conf <<EOF
+[Service]
+Environment="OLLAMA_HOST=${bind_host}:${port}"
+Environment="OLLAMA_FLASH_ATTENTION=1"
+User=${AI_USER}
+Group=${AI_GROUP}
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+EOF
+  if [ -n "$models_dir" ]; then
+    cat >> /etc/systemd/system/ollama.service.d/override.conf <<EOF
+Environment="OLLAMA_MODELS=${models_dir}"
+EOF
+  fi
+  if [ -n "$gpu_uuids" ]; then
+    cat >> /etc/systemd/system/ollama.service.d/override.conf <<EOF
+Environment="CUDA_VISIBLE_DEVICES=${gpu_uuids}"
+EOF
+  fi
+}
+
 configure_ollama_service_lan() {
   header
+  load_manifest
   local port
   local bind_host
   local gpu_uuids=""
+  local models_dir="${OLLAMA_MODELS_DIR:-}"
+  if [ "$OLLAMA_MODELS_DIR_FROM_CLI" = "1" ]; then
+    models_dir=""
+  fi
   port="$(ask_port "Ollama port" "$OLLAMA_PORT_DEFAULT")"
   bind_host="$(ask "Ollama bind host" "$OLLAMA_BIND_HOST")"
   if ! validate_bind_host "$bind_host"; then
@@ -746,25 +868,19 @@ configure_ollama_service_lan() {
     return 1
   fi
 
-  backup_path /etc/systemd/system/ollama.service.d
-  mkdir -p /etc/systemd/system/ollama.service.d
-  cat > /etc/systemd/system/ollama.service.d/override.conf <<EOF
-[Service]
-Environment="OLLAMA_HOST=${bind_host}:${port}"
-Environment="OLLAMA_FLASH_ATTENTION=1"
-User=${AI_USER}
-Group=${AI_GROUP}
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectControlGroups=true
-ProtectKernelModules=true
-ProtectKernelTunables=true
-RestrictSUIDSGID=true
-EOF
+  if [ -n "$models_dir" ]; then
+    validate_absolute_path "$models_dir" || {
+      fail "Invalid Ollama models directory: $models_dir"
+      pause
+      return 1
+    }
+    mkdir -p "$models_dir"
+    chown -R "$AI_USER:$AI_GROUP" "$models_dir"
+    record_manifest "OLLAMA_MODELS_DIR" "$models_dir"
+  fi
+
+  write_ollama_override "$port" "$bind_host" "$gpu_uuids" "$models_dir"
   if [ -n "$gpu_uuids" ]; then
-    cat >> /etc/systemd/system/ollama.service.d/override.conf <<EOF
-Environment="CUDA_VISIBLE_DEVICES=${gpu_uuids}"
-EOF
     record_manifest "NVIDIA_GPU_UUIDS" "$gpu_uuids"
   fi
 
@@ -778,6 +894,109 @@ EOF
   systemctl restart ollama
 
   ok "Ollama service configured on ${bind_host}:${port}."
+  pause
+}
+
+configure_ollama_models_dir() {
+  header
+  echo "Configure Ollama model storage directory"
+  echo ""
+  ensure_ai_user
+  load_manifest
+
+  local current_dir
+  local new_dir
+  local old_resolved
+  local new_resolved
+  local port="${OLLAMA_PORT:-$OLLAMA_PORT_DEFAULT}"
+  local bind_host="${OLLAMA_BIND_HOST:-0.0.0.0}"
+  local gpu_uuids="${NVIDIA_GPU_UUIDS:-}"
+  local bin
+
+  current_dir="$(current_ollama_models_dir)"
+  echo "Current/default model directory: ${current_dir}"
+  echo ""
+  new_dir="$(ask_absolute_path "New Ollama models directory" "$current_dir")"
+
+  old_resolved="$(realpath -m -- "$current_dir")"
+  new_resolved="$(realpath -m -- "$new_dir")"
+  if [ "$old_resolved" = "$new_resolved" ]; then
+    ok "Ollama is already configured for this model directory."
+    pause
+    return 0
+  fi
+  if [[ "$new_resolved" = "$old_resolved"/* ]] || [[ "$old_resolved" = "$new_resolved"/* ]]; then
+    fail "Refusing migration where old and new directories contain each other."
+    pause
+    return 1
+  fi
+
+  mkdir -p "$new_resolved"
+  chown -R "$AI_USER:$AI_GROUP" "$new_resolved"
+  echo ""
+  echo "Target filesystem:"
+  df -h "$new_resolved" || true
+  if ! sudo -u "$AI_USER" test -w "$new_resolved"; then
+    fail "AI user cannot write to model directory: $new_resolved"
+    pause
+    return 1
+  fi
+
+  if [ -d "$old_resolved" ] && [ -n "$(find "$old_resolved" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+    echo ""
+    echo "Existing model data found at: $old_resolved"
+    local migrate
+    migrate="$(ask "Migrate existing model data to the new directory yes or no" "yes")"
+    if is_yes "$migrate"; then
+      echo "Stopping Ollama before migration..."
+      systemctl stop ollama >/dev/null 2>&1 || true
+      echo "Copying model data. This may take a while..."
+      cp -a "$old_resolved"/. "$new_resolved"/
+      chown -R "$AI_USER:$AI_GROUP" "$new_resolved"
+      ok "Model data copied to: $new_resolved"
+
+      local remove_old
+      remove_old="$(ask "Remove old model directory after successful copy yes or no" "no")"
+      if is_yes "$remove_old"; then
+        rm -rf -- "$old_resolved"
+        ok "Old model directory removed: $old_resolved"
+      fi
+    fi
+  fi
+
+  if ensure_nvidia_gpu_ready; then
+    gpu_uuids="$(nvidia_gpu_uuids || true)"
+  fi
+
+  write_ollama_override "$port" "$bind_host" "$gpu_uuids" "$new_resolved"
+  record_manifest "OLLAMA_OVERRIDE_CREATED" "1"
+  record_manifest "OLLAMA_PORT" "$port"
+  record_manifest "OLLAMA_BIND_HOST" "$bind_host"
+  record_manifest "OLLAMA_MODELS_DIR" "$new_resolved"
+  if [ -n "$gpu_uuids" ]; then
+    record_manifest "NVIDIA_GPU_UUIDS" "$gpu_uuids"
+  fi
+  OLLAMA_MODELS_DIR="$new_resolved"
+
+  systemctl daemon-reload
+  systemctl enable ollama >/dev/null 2>&1
+  systemctl restart ollama
+
+  echo "Testing Ollama with new model directory..."
+  sleep 3
+  if curl -fsS "http://127.0.0.1:${port}/api/tags" >/dev/null 2>&1; then
+    ok "Ollama API responds using model directory: $new_resolved"
+  else
+    fail "Ollama API did not respond after changing model directory."
+    journalctl -u ollama -n 80 --no-pager || true
+    pause
+    return 1
+  fi
+
+  if bin="$(choose_ollama_binary)"; then
+    sudo -u "$AI_USER" "$bin" list || "$bin" list || true
+  fi
+
   pause
 }
 
@@ -874,20 +1093,27 @@ recommend_and_install_models() {
     options+=("mistral llama3 phi3")
     options+=("mistral deepseek-coder phi3")
     options+=("phi3 mistral")
+    options+=("skip")
     options+=("custom")
   elif [ "$vram" -ge 8000 ]; then
     options+=("mistral phi3")
     options+=("phi3")
+    options+=("skip")
     options+=("custom")
   else
     options+=("phi3")
+    options+=("skip")
     options+=("custom")
   fi
 
   echo "Choose model set:"
   local i=1
   for o in "${options[@]}"; do
-    echo "$i) $o"
+    if [ "$o" = "skip" ]; then
+      echo "$i) Do not install models now"
+    else
+      echo "$i) $o"
+    fi
     i=$((i+1))
   done
   echo ""
@@ -904,6 +1130,12 @@ recommend_and_install_models() {
   fi
 
   local selected="${options[$idx]}"
+  if [ "$selected" = "skip" ]; then
+    ok "Model installation skipped."
+    pause
+    return 0
+  fi
+
   if [ "$selected" = "custom" ]; then
     selected="$(ask "Enter model names separated by spaces" "mistral phi3")"
   fi
@@ -913,7 +1145,12 @@ recommend_and_install_models() {
   echo ""
 
   for m in $selected; do
-    sudo -u "$AI_USER" "$bin" pull "$m" 2>/dev/null || "$bin" pull "$m" 2>/dev/null || true
+    echo "Pulling model: $m"
+    if ! sudo -u "$AI_USER" "$bin" pull "$m"; then
+      warn "Pull as ${AI_USER} failed for ${m}; retrying as current user."
+      "$bin" pull "$m" || warn "Could not pull model: $m"
+    fi
+    echo ""
   done
 
   ok "Model installation completed (best effort)."
@@ -1023,8 +1260,17 @@ install_openwebui() {
 
   run_required "Upgrading pip in Open WebUI venv..." "$OPENWEBUI_VENV/bin/pip" install --upgrade pip
   run_required "Installing Open WebUI package..." "$OPENWEBUI_VENV/bin/pip" install -U "$OPENWEBUI_PACKAGE"
+  run_required "Installing modern SQLite compatibility package..." "$OPENWEBUI_VENV/bin/pip" install -U pysqlite3-binary
+  if [ ! -x "$OPENWEBUI_VENV/bin/open-webui" ]; then
+    fail "Open WebUI command not found at $OPENWEBUI_VENV/bin/open-webui"
+    pause
+    return 1
+  fi
+
+  write_openwebui_sqlite_compat
 
   mkdir -p "$OPENWEBUI_DATA_DIR"
+  mkdir -p "${OPENWEBUI_DATA_DIR}/cache"
   chown -R "$AI_USER:$AI_GROUP" "$OPENWEBUI_DATA_DIR" "$OPENWEBUI_VENV"
 
   load_manifest
@@ -1037,39 +1283,8 @@ install_openwebui() {
   fi
   webui_port="$(ask_port "WebUI port" "$WEBUI_PORT_DEFAULT")"
 
-  cat > "$OPENWEBUI_ENV_FILE" <<EOF
-PORT=${webui_port}
-DATA_DIR=${OPENWEBUI_DATA_DIR}
-OLLAMA_BASE_URL=http://${ollama_base_host}:${ollama_port}
-UVICORN_WORKERS=1
-EOF
-  chmod 640 "$OPENWEBUI_ENV_FILE"
-
-  backup_path /etc/systemd/system/openwebui.service
-  cat > /etc/systemd/system/openwebui.service <<EOF
-[Unit]
-Description=Open WebUI
-After=network-online.target ollama.service
-Wants=network-online.target ollama.service
-
-[Service]
-Type=simple
-WorkingDirectory=${OPENWEBUI_DATA_DIR}
-EnvironmentFile=${OPENWEBUI_ENV_FILE}
-ExecStart=${OPENWEBUI_VENV}/bin/python -m open_webui serve
-User=${AI_USER}
-Group=${AI_GROUP}
-Restart=always
-RestartSec=5
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-ReadWritePaths=${OPENWEBUI_DATA_DIR}
-
-[Install]
-WantedBy=multi-user.target
-EOF
+  write_openwebui_env_file "$webui_port" "http://${ollama_base_host}:${ollama_port}"
+  write_openwebui_service "$webui_port"
 
   record_manifest "OPENWEBUI_SERVICE_CREATED" "1"
   record_manifest "OPENWEBUI_PORT" "$webui_port"
@@ -1083,7 +1298,218 @@ EOF
   systemctl enable openwebui >/dev/null 2>&1
   systemctl restart openwebui
 
-  ok "Open WebUI installed and running on port ${webui_port}."
+  if wait_openwebui_health "$webui_port"; then
+    ok "Open WebUI installed and responding on port ${webui_port}."
+  else
+    warn "Open WebUI service started, but health did not respond yet. Check: journalctl -u openwebui -e --no-pager"
+  fi
+  pause
+}
+
+write_openwebui_sqlite_compat() {
+  local site_packages
+  site_packages="$("$OPENWEBUI_VENV/bin/python" -c 'import site; print(site.getsitepackages()[0])')"
+  cat > "${site_packages}/sitecustomize.py" <<'EOF'
+try:
+    import sys
+    import pysqlite3
+
+    sys.modules["sqlite3"] = pysqlite3
+except Exception:
+    pass
+EOF
+}
+
+write_openwebui_env_file() {
+  local webui_port="$1"
+  local ollama_base_url="$2"
+  cat > "$OPENWEBUI_ENV_FILE" <<EOF
+PORT=${webui_port}
+DATA_DIR=${OPENWEBUI_DATA_DIR}
+OLLAMA_BASE_URL=${ollama_base_url}
+UVICORN_WORKERS=1
+XDG_CACHE_HOME=${OPENWEBUI_DATA_DIR}/cache
+HF_HOME=${OPENWEBUI_DATA_DIR}/cache/huggingface
+SENTENCE_TRANSFORMERS_HOME=${OPENWEBUI_DATA_DIR}/cache/sentence-transformers
+TRANSFORMERS_CACHE=${OPENWEBUI_DATA_DIR}/cache/transformers
+EOF
+  chmod 640 "$OPENWEBUI_ENV_FILE"
+}
+
+write_openwebui_service() {
+  local webui_port="$1"
+  backup_path /etc/systemd/system/openwebui.service
+  cat > /etc/systemd/system/openwebui.service <<EOF
+[Unit]
+Description=Open WebUI
+After=network-online.target ollama.service
+Wants=network-online.target ollama.service
+
+[Service]
+Type=simple
+WorkingDirectory=${OPENWEBUI_DATA_DIR}
+EnvironmentFile=${OPENWEBUI_ENV_FILE}
+ExecStart=${OPENWEBUI_VENV}/bin/open-webui serve --host 0.0.0.0 --port ${webui_port}
+User=${AI_USER}
+Group=${AI_GROUP}
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=${OPENWEBUI_DATA_DIR}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+wait_openwebui_health() {
+  local webui_port="$1"
+  echo "Waiting for Open WebUI to respond on port ${webui_port}..."
+  echo "The first start may download embedding assets and can take several minutes."
+  local attempt
+  for attempt in $(seq 1 60); do
+    if curl -fsS "http://127.0.0.1:${webui_port}/health" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
+
+openwebui_package_version() {
+  "$OPENWEBUI_VENV/bin/pip" show open-webui 2>/dev/null | awk -F': ' '/^Version:/ {print $2; exit}'
+}
+
+openwebui_outdated_versions() {
+  local json
+  set +e
+  json="$("$OPENWEBUI_VENV/bin/pip" list --outdated --format=json 2>/dev/null)"
+  local rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || return 1
+  printf '%s' "$json" | "$OPENWEBUI_VENV/bin/python" -c 'import json,sys
+name="open-webui"
+for pkg in json.load(sys.stdin):
+    pkg_name=pkg.get("name","").lower().replace("_","-")
+    if pkg_name == name:
+        print(pkg.get("version","") + " " + pkg.get("latest_version",""))
+        break'
+}
+
+update_openwebui() {
+  header
+  echo "Checking Open WebUI updates..."
+  load_manifest
+
+  local webui_port="${OPENWEBUI_PORT:-$WEBUI_PORT_DEFAULT}"
+  local ollama_base_url="${OPENWEBUI_OLLAMA_BASE_URL:-http://127.0.0.1:${OLLAMA_PORT:-$OLLAMA_PORT_DEFAULT}}"
+  local current
+  local outdated
+  local current_from_outdated
+  local latest
+  local ans
+
+  if [ ! -x "$OPENWEBUI_VENV/bin/pip" ] || [ ! -x "$OPENWEBUI_VENV/bin/python" ]; then
+    fail "Open WebUI venv not found at $OPENWEBUI_VENV. Install Open WebUI first."
+    pause
+    return 1
+  fi
+
+  current="$(openwebui_package_version || true)"
+  if [ -z "$current" ]; then
+    fail "Open WebUI package is not installed in $OPENWEBUI_VENV."
+    pause
+    return 1
+  fi
+  echo "Current Open WebUI version: $current"
+
+  if ! outdated="$(openwebui_outdated_versions)"; then
+    warn "Could not check PyPI for Open WebUI updates. Network or pip index may be unavailable."
+    echo "Repairing service compatibility and running health check..."
+    run_required "Ensuring modern SQLite compatibility package..." "$OPENWEBUI_VENV/bin/pip" install -U pysqlite3-binary
+    write_openwebui_sqlite_compat
+    mkdir -p "$OPENWEBUI_DATA_DIR/cache"
+    chown -R "$AI_USER:$AI_GROUP" "$OPENWEBUI_DATA_DIR" "$OPENWEBUI_VENV"
+    write_openwebui_env_file "$webui_port" "$ollama_base_url"
+    write_openwebui_service "$webui_port"
+    systemctl daemon-reload
+    systemctl restart openwebui
+    if wait_openwebui_health "$webui_port"; then
+      ok "Open WebUI is healthy on port ${webui_port}."
+    else
+      fail "Open WebUI health check failed after repair."
+      journalctl -u openwebui -n 120 --no-pager || true
+      pause
+      return 1
+    fi
+    pause
+    return 0
+  fi
+  if [ -z "$outdated" ]; then
+    ok "No Open WebUI update reported by pip."
+    echo "Repairing service compatibility and running health check..."
+    run_required "Ensuring modern SQLite compatibility package..." "$OPENWEBUI_VENV/bin/pip" install -U pysqlite3-binary
+    write_openwebui_sqlite_compat
+    mkdir -p "$OPENWEBUI_DATA_DIR/cache"
+    chown -R "$AI_USER:$AI_GROUP" "$OPENWEBUI_DATA_DIR" "$OPENWEBUI_VENV"
+    write_openwebui_env_file "$webui_port" "$ollama_base_url"
+    write_openwebui_service "$webui_port"
+    systemctl daemon-reload
+    systemctl restart openwebui
+    if wait_openwebui_health "$webui_port"; then
+      ok "Open WebUI is healthy on port ${webui_port}."
+    else
+      fail "Open WebUI health check failed after repair."
+      journalctl -u openwebui -n 120 --no-pager || true
+      pause
+      return 1
+    fi
+    pause
+    return 0
+  fi
+
+  current_from_outdated="${outdated%% *}"
+  latest="${outdated#* }"
+  echo "Update available: ${current_from_outdated} -> ${latest}"
+  ans="$(confirm_proceed "Apply Open WebUI update now yes or no" "yes")"
+  if ! is_yes "$ans"; then
+    warn "Update cancelled."
+    pause
+    return 0
+  fi
+
+  systemctl stop openwebui >/dev/null 2>&1 || true
+  run_required "Upgrading pip in Open WebUI venv..." "$OPENWEBUI_VENV/bin/pip" install --upgrade pip
+  run_required "Updating Open WebUI package..." "$OPENWEBUI_VENV/bin/pip" install -U "$OPENWEBUI_PACKAGE"
+  run_required "Ensuring modern SQLite compatibility package..." "$OPENWEBUI_VENV/bin/pip" install -U pysqlite3-binary
+  if [ ! -x "$OPENWEBUI_VENV/bin/open-webui" ]; then
+    fail "Open WebUI command not found after update: $OPENWEBUI_VENV/bin/open-webui"
+    pause
+    return 1
+  fi
+  write_openwebui_sqlite_compat
+  mkdir -p "$OPENWEBUI_DATA_DIR/cache"
+  chown -R "$AI_USER:$AI_GROUP" "$OPENWEBUI_DATA_DIR" "$OPENWEBUI_VENV"
+  write_openwebui_env_file "$webui_port" "$ollama_base_url"
+  write_openwebui_service "$webui_port"
+  record_manifest "OPENWEBUI_PACKAGE" "$OPENWEBUI_PACKAGE"
+  record_manifest "OPENWEBUI_PORT" "$webui_port"
+  record_manifest "OPENWEBUI_OLLAMA_BASE_URL" "$ollama_base_url"
+  systemctl daemon-reload
+  systemctl enable openwebui >/dev/null 2>&1
+  systemctl restart openwebui
+
+  if wait_openwebui_health "$webui_port"; then
+    ok "Open WebUI updated and healthy: $(openwebui_package_version)"
+  else
+    fail "Open WebUI update completed, but health check failed."
+    journalctl -u openwebui -n 120 --no-pager || true
+    pause
+    return 1
+  fi
   pause
 }
 
@@ -1306,17 +1732,298 @@ uninstall_stack() {
   pause
 }
 
+redact_sensitive_stream() {
+  sed -E 's/([A-Za-z0-9_]*(PASSWORD|PASS|SECRET|TOKEN|API_KEY|KEY)[A-Za-z0-9_]*=)[^[:space:]]+/\1<redacted>/g'
+}
+
+show_file_if_present() {
+  local label="$1"
+  local path="$2"
+  echo "${label}: ${path}"
+  if [ -e "$path" ]; then
+    ls -ld "$path" || true
+  else
+    echo "  missing"
+  fi
+}
+
+show_http_probe() {
+  local label="$1"
+  local url="$2"
+  if curl -fsS --max-time 5 "$url" >/dev/null 2>&1; then
+    echo "  OK    ${label}: ${url}"
+  else
+    echo "  FAIL  ${label}: ${url}"
+  fi
+}
+
 show_install_state() {
   header
+  load_manifest
+
+  local host_ips
+  local ollama_env
+  local ollama_port="${OLLAMA_PORT:-$OLLAMA_PORT_DEFAULT}"
+  local ollama_bind="${OLLAMA_BIND_HOST:-0.0.0.0}"
+  local ollama_models_dir
+  local webui_port="${OPENWEBUI_PORT:-$WEBUI_PORT_DEFAULT}"
+  local openwebui_data="${OPENWEBUI_DATA_DIR:-/var/lib/open-webui}"
+  local openwebui_env="${OPENWEBUI_ENV_FILE:-/etc/xemi-ai/openwebui.env}"
+  local openwebui_base_url="${OPENWEBUI_OLLAMA_BASE_URL:-http://127.0.0.1:${ollama_port}}"
+  local first_ip=""
+  local bin
+
+  host_ips="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $2 " " $4}' || true)"
+  first_ip="$(printf '%s\n' "$host_ips" | awk 'NR==1 {sub(/\/.*/, "", $2); print $2}')"
+  ollama_env="$(systemctl show ollama -p Environment --no-pager 2>/dev/null || true)"
+  if echo "$ollama_env" | grep -q 'OLLAMA_HOST='; then
+    ollama_bind="$(printf '%s\n' "$ollama_env" | tr ' ' '\n' | awk -F= '/^OLLAMA_HOST=/ {print $2; exit}' | sed -E 's/:[0-9]+$//')"
+    ollama_port="$(printf '%s\n' "$ollama_env" | tr ' ' '\n' | awk -F= '/^OLLAMA_HOST=/ {print $2; exit}' | awk -F: '{print $NF}')"
+  fi
+  ollama_models_dir="$(current_ollama_models_dir 2>/dev/null || default_ollama_models_dir)"
+
+  echo "Xemi AI installation report"
+  echo "Generated: $(date '+%F %T %Z')"
+  echo ""
+
+  echo "== Host =="
+  echo "Hostname: $(hostname -f 2>/dev/null || hostname)"
+  echo "OS:"
+  if [ -r /etc/os-release ]; then
+    awk -F= '/^(PRETTY_NAME|VERSION_ID|ID)=/ {gsub(/"/, "", $2); print "  " $1 ": " $2}' /etc/os-release
+  fi
+  echo "Kernel: $(uname -r)"
+  echo "IPv4 addresses:"
+  if [ -n "$host_ips" ]; then
+    printf '  %s\n' "$host_ips"
+  else
+    echo "  none detected"
+  fi
+  echo ""
+
+  echo "== Installer State =="
   echo "State directory: $STATE_DIR"
   echo "Manifest: $MANIFEST_FILE"
   echo "Log: $LOG_FILE"
-  echo ""
   if [ -f "$MANIFEST_FILE" ]; then
-    sed -n '1,200p' "$MANIFEST_FILE"
+    echo "Manifest values (sensitive values redacted):"
+    sed -n '1,240p' "$MANIFEST_FILE" | redact_sensitive_stream
   else
     echo "No manifest found."
   fi
+  echo ""
+
+  echo "== Service Users =="
+  echo "Configured AI user/group: ${AI_USER}:${AI_GROUP}"
+  if id "$AI_USER" >/dev/null 2>&1; then
+    id "$AI_USER"
+    echo "Home: $(getent passwd "$AI_USER" | awk -F: '{print $6}')"
+  else
+    echo "User missing: $AI_USER"
+  fi
+  if getent group "$AI_GROUP" >/dev/null 2>&1; then
+    getent group "$AI_GROUP"
+  else
+    echo "Group missing: $AI_GROUP"
+  fi
+  echo "Passwords: Linux account passwords are not stored by this installer."
+  echo ""
+
+  echo "== Ollama =="
+  echo "Binary: $(command -v ollama 2>/dev/null || echo missing)"
+  ollama --version 2>/dev/null || true
+  echo "Service active: $(systemctl is-active ollama 2>/dev/null || true)"
+  echo "Service enabled: $(systemctl is-enabled ollama 2>/dev/null || true)"
+  systemctl show ollama -p User -p Group -p FragmentPath --no-pager 2>/dev/null || true
+  echo "Environment:"
+  systemctl show ollama -p Environment --no-pager 2>/dev/null | redact_sensitive_stream || true
+  echo "Bind: ${ollama_bind}:${ollama_port}"
+  echo "Model directory: ${ollama_models_dir}"
+  if [ -d "$ollama_models_dir" ]; then
+    ls -ld "$ollama_models_dir" || true
+    du -sh "$ollama_models_dir" 2>/dev/null || true
+    df -h "$ollama_models_dir" 2>/dev/null || true
+  else
+    echo "Model directory missing."
+  fi
+  echo "Installed models:"
+  if bin="$(choose_ollama_binary 2>/dev/null)"; then
+    sudo -u "$AI_USER" "$bin" list 2>/dev/null || "$bin" list 2>/dev/null || true
+  else
+    echo "  Ollama binary not found."
+  fi
+  echo ""
+
+  echo "== Open WebUI =="
+  echo "Venv: $OPENWEBUI_VENV"
+  echo "Command: $OPENWEBUI_VENV/bin/open-webui"
+  if [ -x "$OPENWEBUI_VENV/bin/open-webui" ]; then
+    "$OPENWEBUI_VENV/bin/pip" show open-webui 2>/dev/null | awk -F': ' '/^(Name|Version|Location):/ {print $1 ": " $2}' || true
+  else
+    echo "Open WebUI command missing."
+  fi
+  echo "Service active: $(systemctl is-active openwebui 2>/dev/null || true)"
+  echo "Service enabled: $(systemctl is-enabled openwebui 2>/dev/null || true)"
+  systemctl show openwebui -p User -p Group -p FragmentPath --no-pager 2>/dev/null || true
+  show_file_if_present "Data directory" "$openwebui_data"
+  du -sh "$openwebui_data" 2>/dev/null || true
+  show_file_if_present "Environment file" "$openwebui_env"
+  if [ -f "$openwebui_env" ]; then
+    echo "Environment file values (sensitive values redacted):"
+    sed -n '1,200p' "$openwebui_env" | redact_sensitive_stream
+  fi
+  echo "Configured Ollama base URL for Open WebUI: ${openwebui_base_url}"
+  echo "Web UI port: ${webui_port}"
+  echo "Open WebUI secret key file:"
+  show_file_if_present "WEBUI_SECRET_KEY" "${openwebui_data}/.webui_secret_key"
+  echo "  value: <redacted>"
+  echo ""
+
+  echo "== Open WebUI Users =="
+  echo "Passwords are not recoverable in clear text. Stored hashes/secrets are not printed."
+  if [ -f "${openwebui_data}/webui.db" ]; then
+    "$OPENWEBUI_VENV/bin/python" - "$openwebui_data/webui.db" <<'PY' 2>/dev/null || true
+import sqlite3, sys, datetime
+db = sys.argv[1]
+con = sqlite3.connect(db)
+cur = con.cursor()
+try:
+    rows = cur.execute("""
+        select u.email, coalesce(u.username, ''), u.name, u.role,
+               coalesce(a.active, 0), case when length(coalesce(a.password, '')) > 0 then 1 else 0 end,
+               u.created_at, u.last_active_at
+        from user u left join auth a on a.id = u.id
+        order by u.role, u.email
+    """).fetchall()
+except Exception as exc:
+    print(f"  Could not read users: {exc}")
+    sys.exit(0)
+if not rows:
+    print("  No Open WebUI users found yet.")
+else:
+    print("  email | username | name | role | active | password_hash | created | last_active")
+    for email, username, name, role, active, has_hash, created, last_active in rows:
+        def ts(v):
+            try:
+                v = int(v)
+                if v > 1000000000000:
+                    v = v / 1000
+                return datetime.datetime.fromtimestamp(v).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return ""
+        print(f"  {email} | {username} | {name} | {role} | {bool(active)} | {'present' if has_hash else 'missing'} | {ts(created)} | {ts(last_active)}")
+PY
+  else
+    echo "  Open WebUI database not found at ${openwebui_data}/webui.db"
+  fi
+  echo ""
+
+  echo "== Open WebUI API Keys And Tokens =="
+  echo "API keys and OAuth tokens are sensitive and are not printed. This only reports presence/metadata."
+  if [ -f "${openwebui_data}/webui.db" ]; then
+    "$OPENWEBUI_VENV/bin/python" - "$openwebui_data/webui.db" <<'PY' 2>/dev/null || true
+import sqlite3, sys, datetime
+db = sys.argv[1]
+con = sqlite3.connect(db)
+cur = con.cursor()
+
+def ts(v):
+    try:
+        if v is None:
+            return ""
+        v = int(v)
+        if v > 1000000000000:
+            v = v / 1000
+        return datetime.datetime.fromtimestamp(v).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return ""
+
+try:
+    rows = cur.execute("""
+        select coalesce(u.email, a.user_id), a.id, a.expires_at, a.last_used_at, a.created_at
+        from api_key a left join user u on u.id = a.user_id
+        order by a.created_at desc
+    """).fetchall()
+except Exception:
+    rows = []
+
+if rows:
+    print("  API keys:")
+    print("  owner | key_id | secret | expires | last_used | created")
+    for owner, key_id, expires, last_used, created in rows:
+        print(f"  {owner} | {key_id} | <redacted> | {ts(expires)} | {ts(last_used)} | {ts(created)}")
+else:
+    print("  API keys: none found")
+
+try:
+    oauth = cur.execute("""
+        select coalesce(u.email, o.user_id), o.provider, count(*), max(o.expires_at), max(o.updated_at)
+        from oauth_session o left join user u on u.id = o.user_id
+        group by coalesce(u.email, o.user_id), o.provider
+        order by coalesce(u.email, o.user_id), o.provider
+    """).fetchall()
+except Exception:
+    oauth = []
+
+if oauth:
+    print("  OAuth sessions:")
+    print("  owner | provider | count | max_expires | last_updated")
+    for owner, provider, count, expires, updated in oauth:
+        print(f"  {owner} | {provider} | {count} | {ts(expires)} | {ts(updated)}")
+else:
+    print("  OAuth sessions: none found")
+PY
+  else
+    echo "  Open WebUI database not found at ${openwebui_data}/webui.db"
+  fi
+  echo ""
+
+  echo "== Endpoints And How To Connect =="
+  echo "Local endpoints:"
+  echo "  Ollama API:       http://127.0.0.1:${ollama_port}"
+  echo "  Ollama tags:      http://127.0.0.1:${ollama_port}/api/tags"
+  echo "  Open WebUI:       http://127.0.0.1:${webui_port}"
+  echo "  Open WebUI health:http://127.0.0.1:${webui_port}/health"
+  if [ -n "$first_ip" ]; then
+    echo "LAN endpoints:"
+    echo "  Ollama API:       http://${first_ip}:${ollama_port}"
+    echo "  Open WebUI:       http://${first_ip}:${webui_port}"
+  fi
+  echo "Example Ollama API calls:"
+  echo "  curl http://127.0.0.1:${ollama_port}/api/tags"
+  echo "  curl http://127.0.0.1:${ollama_port}/api/generate -d '{\"model\":\"phi3\",\"prompt\":\"hello\",\"stream\":false}'"
+  echo "Open WebUI login/API keys:"
+  echo "  Create/login users in the web UI. API keys, if enabled, are managed inside Open WebUI and are not printed here."
+  echo ""
+
+  echo "== Health Checks =="
+  show_http_probe "Ollama API" "http://127.0.0.1:${ollama_port}/api/tags"
+  show_http_probe "Open WebUI health" "http://127.0.0.1:${webui_port}/health"
+  echo ""
+
+  echo "== Firewall =="
+  echo "firewalld active: $(systemctl is-active firewalld 2>/dev/null || true)"
+  echo "Configured LAN subnet: ${LAN_SUBNET:-$LAN_SUBNET_DEFAULT}"
+  if cmd_exists firewall-cmd; then
+    echo "Permanent rich rules:"
+    firewall-cmd --permanent --list-rich-rules 2>/dev/null | sed 's/^/  /' || true
+  fi
+  echo ""
+
+  echo "== GPU =="
+  if cmd_exists nvidia-smi; then
+    nvidia-smi --query-gpu=name,uuid,memory.total,driver_version --format=csv,noheader 2>/dev/null | sed 's/^/  /' || true
+  else
+    echo "  nvidia-smi not found."
+  fi
+  echo ""
+
+  echo "== Useful Commands =="
+  echo "  sudo /usr/local/bin/xemi_ai_install.sh doctor"
+  echo "  sudo /usr/local/bin/xemi_ai_install.sh openwebui-update"
+  echo "  sudo /usr/local/bin/xemi_ai_install.sh models-dir"
+  echo "  journalctl -u ollama -e --no-pager"
+  echo "  journalctl -u openwebui -e --no-pager"
   pause
 }
 
@@ -1409,6 +2116,26 @@ doctor_check_ollama_gpu_logs() {
   fi
 }
 
+doctor_check_ollama_models_dir() {
+  local env_line
+  if [ -z "${OLLAMA_MODELS_DIR:-}" ]; then
+    doctor_warn "Custom Ollama model directory is not configured; using Ollama default"
+    return 0
+  fi
+  if [ -d "$OLLAMA_MODELS_DIR" ]; then
+    doctor_ok "Ollama model directory exists: $OLLAMA_MODELS_DIR"
+  else
+    doctor_fail "Ollama model directory missing: $OLLAMA_MODELS_DIR"
+    return 0
+  fi
+  env_line="$(systemctl show ollama -p Environment --no-pager 2>/dev/null || true)"
+  if echo "$env_line" | grep -Fq "OLLAMA_MODELS=${OLLAMA_MODELS_DIR}"; then
+    doctor_ok "Ollama service uses configured model directory"
+  else
+    doctor_fail "Ollama service does not expose OLLAMA_MODELS=${OLLAMA_MODELS_DIR}"
+  fi
+}
+
 doctor_check_firewall() {
   if [ "${FIREWALL_CONFIGURED:-}" != "1" ]; then
     doctor_warn "Firewall was not configured by this installer yet"
@@ -1449,6 +2176,7 @@ doctor() {
   doctor_check_command curl
   doctor_check_command "$PY311_BIN"
   doctor_check_command ollama
+  doctor_check_command "$OPENWEBUI_VENV/bin/open-webui"
   echo ""
 
   doctor_check_gpu
@@ -1457,6 +2185,7 @@ doctor() {
   doctor_check_service ollama
   doctor_check_http "Ollama API" "http://127.0.0.1:${ollama_port}/api/tags"
   doctor_check_ollama_gpu_logs
+  doctor_check_ollama_models_dir
   echo ""
 
   doctor_check_service openwebui
@@ -1506,6 +2235,9 @@ full_install_stack() {
   ensure_ai_user
   install_ollama_official
   configure_ollama_service_lan
+  if [ -n "${OLLAMA_MODELS_DIR:-}" ]; then
+    configure_ollama_models_dir
+  fi
   recommend_and_install_models
   install_openwebui
   configure_firewall_lan_only
@@ -1546,40 +2278,59 @@ full_new_server_setup() {
 menu() {
   while true; do
     header
-    echo "1) Full new server setup (drivers, Ollama, WebUI, GPU, firewall)"
-    echo "2) Stage 1, install NVIDIA drivers and reboot"
-    echo "3) Stage 2, install AI stack (Ollama, models, WebUI, firewall)"
+    menu_section "Guided Installation"
+    menu_item 1 "Full new server setup (drivers, Ollama, WebUI, GPU, firewall)"
+    menu_item 2 "Stage 1, install NVIDIA drivers and reboot"
+    menu_item 3 "Stage 2, install AI stack (Ollama, models, WebUI, firewall)"
     echo ""
-    echo "4) Show GPU info and recommendations"
-    echo "5) Show Ollama status, service, location"
+
+    menu_section "Hardware And Status"
+    menu_item 4 "Show GPU info and recommendations"
+    menu_item 5 "Show Ollama status, service, location"
     echo ""
-    echo "6) Install Ollama (official installer)"
-    echo "7) Configure Ollama service for LAN"
-    echo "8) Ollama health check"
+
+    menu_section "Ollama Service"
+    menu_item 6 "Install Ollama (official installer)"
+    menu_item 7 "Configure Ollama service for LAN"
+    menu_item 8 "Ollama health check"
     echo ""
-    echo "9) Recommend and install models (choose set)"
-    echo "10) List models"
-    echo "11) Remove models (interactive)"
+
+    menu_section "Models"
+    menu_item 9 "Configure Ollama models directory / migrate model data"
+    menu_item 10 "Recommend and install models (choose set)"
+    menu_item 11 "List models"
+    menu_item 12 "Remove models (interactive)"
     echo ""
-    echo "12) Remove Ollama by location (discover multiple and remove)"
+
+    menu_section "Ollama Removal"
+    menu_item 13 "Remove Ollama by location (discover multiple and remove)"
     echo ""
-    echo "13) Install Python 3.11"
-    echo "14) Install Open WebUI (Python 3.11 venv service)"
-    echo "15) Open WebUI health check"
+
+    menu_section "Open WebUI"
+    menu_item 14 "Install Python 3.11"
+    menu_item 15 "Install Open WebUI (Python 3.11 venv service)"
+    menu_item 16 "Check/apply Open WebUI updates"
+    menu_item 17 "Open WebUI health check"
     echo ""
-    echo "16) Configure firewall (LAN only)"
-    echo "17) Show ports in use and service bindings"
+
+    menu_section "Network"
+    menu_item 18 "Configure firewall (LAN only)"
+    menu_item 19 "Show ports in use and service bindings"
     echo ""
-    echo "18) Show install state"
-    echo "19) Run doctor readiness check"
-    echo "20) Uninstall stack (keep Ollama data)"
-    echo "21) Purge stack (reset to zero)"
+
+    menu_section "Diagnostics And Maintenance"
+    menu_item 20 "Show detailed installation report"
+    menu_item 21 "Run doctor readiness check"
+    menu_item 22 "Uninstall stack (keep Ollama data)"
+    menu_item 23 "Purge stack (reset to zero)"
     echo ""
-    echo "22) Exit"
+
+    menu_section "Session"
+    menu_item 24 "Exit"
     echo ""
 
     local opt
-    opt="$(ask "Select option" "22")"
+    opt="$(ask "Select option" "24")"
     sleep_screen
 
     case "$opt" in
@@ -1591,20 +2342,22 @@ menu() {
       6) install_ollama_official ;;
       7) configure_ollama_service_lan ;;
       8) ollama_health_check ;;
-      9) recommend_and_install_models ;;
-      10) list_ollama_models ;;
-      11) remove_ollama_models_interactive ;;
-      12) remove_ollama_by_location ;;
-      13) install_python311 ;;
-      14) install_openwebui ;;
-      15) openwebui_health_check ;;
-      16) configure_firewall_lan_only ;;
-      17) show_ports_and_services ;;
-      18) show_install_state ;;
-      19) doctor ;;
-      20) uninstall_stack 0 ;;
-      21) uninstall_stack 1 ;;
-      22) exit 0 ;;
+      9) configure_ollama_models_dir ;;
+      10) recommend_and_install_models ;;
+      11) list_ollama_models ;;
+      12) remove_ollama_models_interactive ;;
+      13) remove_ollama_by_location ;;
+      14) install_python311 ;;
+      15) install_openwebui ;;
+      16) update_openwebui ;;
+      17) openwebui_health_check ;;
+      18) configure_firewall_lan_only ;;
+      19) show_ports_and_services ;;
+      20) show_install_state ;;
+      21) doctor ;;
+      22) uninstall_stack 0 ;;
+      23) uninstall_stack 1 ;;
+      24) exit 0 ;;
       *) warn "Invalid option." ; sleep_screen ;;
     esac
   done
@@ -1619,11 +2372,15 @@ Commands:
   install     Full new server setup
   stack       Install AI stack only, assuming drivers are ready
   drivers     Install NVIDIA driver stage
+  models-dir  Configure/migrate Ollama model storage directory
+  openwebui-update
+              Check/apply Open WebUI package updates
   doctor      Run readiness checks
   uninstall   Remove services/Open WebUI, keep Ollama data
   purge       Reset installation to zero
   status      Show ports and service status
-  state       Show installer manifest
+  state       Show detailed installed configuration report
+  report      Alias for state
 
 Options:
   -y, --yes                    Use defaults and skip pauses
@@ -1632,6 +2389,7 @@ Options:
   --webui-port PORT            Set Open WebUI port (default: ${WEBUI_PORT_DEFAULT})
   --lan CIDR                   Set allowed LAN subnet (default: ${LAN_SUBNET_DEFAULT})
   --ollama-bind-host HOST      Set Ollama bind host (default: ${OLLAMA_BIND_HOST})
+  --ollama-models-dir PATH     Set custom Ollama model directory
   --ai-user USER               Set service user (default: ${AI_USER})
   --ai-group GROUP             Set service group (default: ${AI_GROUP})
   --openwebui-package PACKAGE  Set pip package, for example open-webui==0.7.2
@@ -1684,6 +2442,13 @@ parse_args() {
         [ "$#" -ge 2 ] || { echo "Missing value for --ollama-bind-host"; exit 1; }
         validate_bind_host "$2" || { echo "Invalid --ollama-bind-host: $2"; exit 1; }
         OLLAMA_BIND_HOST="$2"
+        shift 2
+        ;;
+      --ollama-models-dir)
+        [ "$#" -ge 2 ] || { echo "Missing value for --ollama-models-dir"; exit 1; }
+        validate_absolute_path "$2" || { echo "Invalid --ollama-models-dir: $2"; exit 1; }
+        OLLAMA_MODELS_DIR="$2"
+        OLLAMA_MODELS_DIR_FROM_CLI=1
         shift 2
         ;;
       --ai-user)
@@ -1763,13 +2528,20 @@ main() {
     install|new-server|bootstrap) full_new_server_setup ;;
     drivers) full_install_drivers ;;
     stack) full_install_stack ;;
+    models-dir) configure_ollama_models_dir ;;
+    openwebui-update|webui-update) update_openwebui ;;
     doctor) doctor ;;
     uninstall) uninstall_stack 0 ;;
     purge) uninstall_stack 1 ;;
     status) show_ports_and_services ;;
-    state) show_install_state ;;
+    state|report|info) show_install_state ;;
     *) usage; exit 1 ;;
   esac
 }
+
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  echo "Do not source this installer. Run it as a command instead: sudo $BASH_SOURCE install"
+  return 1
+fi
 
 main "$@"
