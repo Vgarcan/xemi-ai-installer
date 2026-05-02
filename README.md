@@ -169,6 +169,30 @@ For a new server, use:
 
 The menu also exposes individual operations such as installing drivers, installing the AI stack, configuring firewall rules, checking services, running diagnostics, uninstalling, and purging.
 
+## Existing Installations
+
+If you run `install` on a host where Ollama or Open WebUI already exists, the installer now detects that state instead of treating it like a blank machine.
+
+It offers two safe paths:
+
+- Exit without making changes.
+- Repair and verify the existing installation.
+
+The repair flow:
+
+- Verifies NVIDIA GPU readiness.
+- Reapplies the managed Ollama and Open WebUI service settings.
+- Rechecks Ollama runtime libraries.
+- Restarts Ollama and verifies that it bootstraps with CUDA instead of CPU when the GPU is available.
+- Installs a boot-time GPU guard that can restart Ollama once if it comes up in CPU mode even though NVIDIA is ready.
+- Runs the normal health checks.
+
+You can also call repair directly:
+
+```bash
+sudo /usr/local/bin/xemi_ai_install.sh repair
+```
+
 ## Dry Run
 
 Use `--dry-run` before touching a real server. It prints the resolved plan and exits without installing packages, creating users, changing systemd units, writing firewall rules, creating the manifest, or writing logs.
@@ -405,8 +429,11 @@ During Ollama configuration it:
 
 - Checks `nvidia-smi`.
 - Reads NVIDIA GPU UUIDs when available.
-- Writes `CUDA_VISIBLE_DEVICES=<gpu-uuid-list>` to the Ollama systemd override.
+- Verifies Ollama runtime libraries, including CUDA libraries when NVIDIA is present.
+- Enables NVIDIA persistence when available.
 - Enables `OLLAMA_FLASH_ATTENTION=1`.
+- Sets `OLLAMA_KEEP_ALIVE=30m` so recently used models stay loaded longer.
+- Lets Ollama discover visible CUDA devices automatically.
 - Restarts the Ollama service.
 
 If the GPU is not ready, the installer fails instead of silently installing a CPU-only setup.
@@ -716,7 +743,7 @@ The doctor check verifies:
 
 - Required commands are available.
 - NVIDIA GPU is visible through `nvidia-smi`.
-- Ollama has GPU-related systemd environment settings.
+- Ollama runtime libraries are present.
 - Recent Ollama logs include CUDA/GPU-related signals when available.
 - `ollama` is enabled for autostart.
 - `ollama` is running.

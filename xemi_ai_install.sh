@@ -63,6 +63,16 @@ require_root() {
 
 cmd_exists() { command -v "$1" >/dev/null 2>&1; }
 
+json_escape() {
+  if cmd_exists python3; then
+    python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])' < /dev/stdin
+  elif cmd_exists python; then
+    python -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])' < /dev/stdin
+  else
+    sed -e 's/\\/\\\\/g' -e 's/"/\\\"/g' -e 's/\t/\\t/g' -e 's/\r/\\r/g' -e 's/\n/\\n/g'
+  fi
+}
+
 header() {
   if [ "$ASSUME_YES" != "1" ]; then
     clear || true
@@ -536,6 +546,316 @@ ensure_nvidia_gpu_ready() {
   fi
 }
 
+enable_nvidia_persistence() {
+  if ! cmd_exists nvidia-smi; then
+    return 0
+  fi
+
+  mkdir -p /etc/modules-load.d
+  cat > /etc/modules-load.d/nvidia.conf <<'EOF'
+nvidia
+nvidia_uvm
+nvidia_modeset
+nvidia_drm
+EOF
+
+  if systemctl list-unit-files nvidia-persistenced.service >/dev/null 2>&1; then
+    run_optional "Enabling NVIDIA persistence daemon..." systemctl enable --now nvidia-persistenced || true
+  fi
+  run_optional "Enabling NVIDIA persistence mode..." nvidia-smi -pm 1 || true
+}
+
+is_ollama_service_installed() {
+  if ! cmd_exists ollama; then
+    return 1
+  fi
+  systemctl list-unit-files ollama.service >/dev/null 2>&1
+}
+
+is_openwebui_installed() {
+  [ -x "$OPENWEBUI_VENV/bin/open-webui" ]
+}
+
+has_existing_installation() {
+  load_manifest
+  if [ -n "${OLLAMA_INSTALLED_BY_XEMI:-}" ] || [ -n "${OPENWEBUI_SERVICE_CREATED:-}" ]; then
+    return 0
+  fi
+
+  if is_ollama_service_installed || is_openwebui_installed; then
+    return 0
+  fi
+  return 1
+}
+
+ollama_current_compute_mode() {
+  local pid logs
+  pid="$(systemctl show ollama -p MainPID --value --no-pager 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  [ "$pid" -gt 0 ] || return 1
+
+  logs="$(journalctl _PID="$pid" -o cat --no-pager 2>/dev/null || true)"
+  if echo "$logs" | grep -q 'library=CUDA'; then
+    echo "gpu"
+    return 0
+  fi
+  if echo "$logs" | grep -q 'id=cpu library=cpu'; then
+    echo "cpu"
+    return 0
+  fi
+  return 1
+}
+
+wait_for_ollama_compute_mode() {
+  local attempts="${1:-30}"
+  local delay="${2:-2}"
+  local mode=""
+  local i
+
+  for ((i=1; i<=attempts; i++)); do
+    if mode="$(ollama_current_compute_mode 2>/dev/null || true)" && [ -n "$mode" ]; then
+      echo "$mode"
+      return 0
+    fi
+    sleep "$delay"
+  done
+  return 1
+}
+
+ensure_ollama_uses_gpu() {
+  local allow_restart="${1:-1}"
+  local mode=""
+
+  if ! ensure_nvidia_gpu_ready; then
+    return 0
+  fi
+
+  if ! mode="$(wait_for_ollama_compute_mode 45 2 || true)" || [ -z "$mode" ]; then
+    fail "Could not determine whether Ollama started with GPU or CPU."
+    return 1
+  fi
+
+  if [ "$mode" = "gpu" ]; then
+    ok "Ollama detected CUDA and is ready to use the GPU."
+    return 0
+  fi
+
+  if [ "$allow_restart" = "1" ]; then
+    warn "Ollama started in CPU mode even though NVIDIA GPU is ready. Restarting Ollama once."
+    systemctl restart ollama
+    mode="$(wait_for_ollama_compute_mode 45 2 || true)"
+    if [ "$mode" = "gpu" ]; then
+      ok "Ollama switched to CUDA after restart."
+      return 0
+    fi
+  fi
+
+  fail "Ollama is still in CPU mode while NVIDIA GPU is available."
+  return 1
+}
+
+repair_ollama_service_override() {
+  local port="${OLLAMA_PORT:-$OLLAMA_PORT_DEFAULT}"
+  local bind_host="${OLLAMA_BIND_HOST:-0.0.0.0}"
+  local models_dir="$(current_ollama_models_dir)"
+  local gpu_uuids=""
+
+  if ensure_nvidia_gpu_ready; then
+    enable_nvidia_persistence
+    gpu_uuids="$(nvidia_gpu_uuids || true)"
+  fi
+
+  write_ollama_override "$port" "$bind_host" "$gpu_uuids" "$models_dir"
+  if [ -n "$gpu_uuids" ]; then
+    record_manifest "NVIDIA_GPU_UUIDS" "$gpu_uuids"
+  fi
+  record_manifest "OLLAMA_OVERRIDE_CREATED" "1"
+  record_manifest "OLLAMA_PORT" "$port"
+  record_manifest "OLLAMA_BIND_HOST" "$bind_host"
+  systemctl daemon-reload
+  systemctl enable ollama >/dev/null 2>&1 || true
+  systemctl enable xemi-ollama-gpu-guard.service >/dev/null 2>&1 || true
+  systemctl restart ollama || true
+  ensure_ollama_uses_gpu 1 || true
+}
+
+repair_ollama_installation() {
+  header
+  echo "Repairing Ollama installation..."
+  load_manifest
+  ensure_ai_user
+
+  if ! cmd_exists ollama; then
+    warn "Ollama binary missing; installing Ollama."
+    install_ollama_official
+    return
+  fi
+
+  if verify_ollama_runtime_libs; then
+    ok "Ollama runtime libraries verified."
+  else
+    warn "Ollama runtime or CUDA libraries appear incomplete. Re-installing Ollama."
+    install_ollama_official
+    return
+  fi
+
+  if ! systemctl show ollama -p Environment --no-pager 2>/dev/null | grep -q 'OLLAMA_HOST='; then
+    warn "Ollama systemd override missing or incomplete; reconfiguring."
+    repair_ollama_service_override
+  else
+    ok "Ollama service configuration present."
+    repair_ollama_service_override
+  fi
+  pause
+}
+
+repair_openwebui_installation() {
+  header
+  echo "Repairing Open WebUI installation..."
+  load_manifest
+  install_python311
+  ensure_ai_user
+  ensure_base_tools
+
+  if [ ! -d "$OPENWEBUI_VENV" ] || [ ! -x "$OPENWEBUI_VENV/bin/open-webui" ]; then
+    warn "Open WebUI venv missing or broken; reinstalling Open WebUI."
+    install_openwebui
+    return
+  fi
+
+  run_required "Upgrading pip in Open WebUI venv..." "$OPENWEBUI_VENV/bin/pip" install --upgrade pip
+  run_required "Reinstalling Open WebUI package..." "$OPENWEBUI_VENV/bin/pip" install -U "$OPENWEBUI_PACKAGE"
+  run_required "Ensuring modern SQLite compatibility package..." "$OPENWEBUI_VENV/bin/pip" install -U pysqlite3-binary
+  write_openwebui_sqlite_compat
+
+  local ollama_port="${OLLAMA_PORT:-$OLLAMA_PORT_DEFAULT}"
+  local ollama_host="${OLLAMA_BIND_HOST:-0.0.0.0}"
+  local ollama_base_host="127.0.0.1"
+  if [ "$ollama_host" != "0.0.0.0" ]; then
+    ollama_base_host="$ollama_host"
+  fi
+
+  local webui_port="${OPENWEBUI_PORT:-$WEBUI_PORT_DEFAULT}"
+  if [ -f "$OPENWEBUI_ENV_FILE" ]; then
+    webui_port="$(grep -E '^PORT=' "$OPENWEBUI_ENV_FILE" | cut -d= -f2 || echo "$webui_port")"
+  fi
+
+  write_openwebui_env_file "$webui_port" "http://${ollama_base_host}:${ollama_port}"
+  write_openwebui_service "$webui_port"
+  record_manifest "OPENWEBUI_SERVICE_CREATED" "1"
+  record_manifest "OPENWEBUI_PORT" "$webui_port"
+  record_manifest "OPENWEBUI_VENV" "$OPENWEBUI_VENV"
+  record_manifest "OPENWEBUI_DATA_DIR" "$OPENWEBUI_DATA_DIR"
+  record_manifest "OPENWEBUI_ENV_FILE" "$OPENWEBUI_ENV_FILE"
+  record_manifest "OPENWEBUI_PACKAGE" "$OPENWEBUI_PACKAGE"
+  record_manifest "OPENWEBUI_OLLAMA_BASE_URL" "http://${ollama_base_host}:${ollama_port}"
+
+  systemctl daemon-reload
+  systemctl enable openwebui >/dev/null 2>&1 || true
+  systemctl restart openwebui || true
+  pause
+}
+
+repair_existing_installation() {
+  header
+  echo "Existing installation detected. Repairing system with GPU prioritized."
+  load_manifest
+  ensure_ai_user
+
+  if ! ensure_nvidia_gpu_ready; then
+    warn "NVIDIA GPU is not ready. Installing NVIDIA drivers now."
+    install_nvidia_drivers
+    if ! ensure_nvidia_gpu_ready; then
+      fail "NVIDIA GPU is still not ready. Reboot, then run: $0 install"
+      pause
+      return 1
+    fi
+  fi
+
+  enable_nvidia_persistence
+  repair_ollama_installation
+  repair_openwebui_installation
+  if [ -z "${FIREWALL_CONFIGURED:-}" ]; then
+    warn "Firewall rules not present or not recorded; configuring firewall."
+    configure_firewall_lan_only
+  fi
+  doctor
+}
+
+verify_ollama_runtime_libs() {
+  local ollama_lib_dir="/usr/local/lib/ollama"
+  local llm_library=""
+  if [ ! -e "${ollama_lib_dir}/libggml-base.so.0" ] && [ ! -e "${ollama_lib_dir}/libggml-base.so.0.0.0" ]; then
+    fail "Ollama runtime libraries are incomplete: missing ${ollama_lib_dir}/libggml-base.so.0. Re-run the Ollama installer."
+    return 1
+  fi
+
+  if ensure_nvidia_gpu_ready; then
+    llm_library="$(detect_ollama_llm_library || true)"
+    if [ -z "$llm_library" ]; then
+      fail "No compatible Ollama CUDA runtime library found under ${ollama_lib_dir}. Re-run the Ollama installer."
+      return 1
+    fi
+  fi
+}
+
+write_ollama_gpu_guard_script() {
+  backup_path /usr/local/bin/xemi_ollama_gpu_guard.sh
+  cat > /usr/local/bin/xemi_ollama_gpu_guard.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+STATE_DIR="/run/xemi-ai"
+STAMP_FILE="${STATE_DIR}/ollama-gpu-guard.boot"
+BOOT_ID="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)"
+
+mkdir -p "$STATE_DIR"
+
+if ! command -v nvidia-smi >/dev/null 2>&1 || ! nvidia-smi >/dev/null 2>&1; then
+  exit 0
+fi
+
+for _ in $(seq 1 45); do
+  pid="$(systemctl show ollama -p MainPID --value --no-pager 2>/dev/null || true)"
+  if [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 0 ]; then
+    logs="$(journalctl _PID="$pid" -o cat --no-pager 2>/dev/null || true)"
+    if echo "$logs" | grep -q 'library=CUDA'; then
+      exit 0
+    fi
+    if echo "$logs" | grep -q 'id=cpu library=cpu'; then
+      if [ -f "$STAMP_FILE" ] && grep -Fxq "$BOOT_ID" "$STAMP_FILE"; then
+        exit 0
+      fi
+      printf '%s\n' "$BOOT_ID" > "$STAMP_FILE"
+      systemctl restart ollama
+      exit 0
+    fi
+  fi
+  sleep 2
+done
+
+exit 0
+EOF
+  chmod 755 /usr/local/bin/xemi_ollama_gpu_guard.sh
+}
+
+write_ollama_gpu_guard_service() {
+  backup_path /etc/systemd/system/xemi-ollama-gpu-guard.service
+  cat > /etc/systemd/system/xemi-ollama-gpu-guard.service <<'EOF'
+[Unit]
+Description=Xemi Ollama GPU Guard
+After=ollama.service nvidia-persistenced.service
+Requires=ollama.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/xemi_ollama_gpu_guard.sh
+
+[Install]
+WantedBy=ollama.service
+EOF
+}
+
 remove_firewall_rule() {
   local rule="$1"
   [ -n "$rule" ] || return 0
@@ -545,7 +865,7 @@ remove_firewall_rule() {
 ensure_base_tools() {
   header
   echo "Installing base tools..."
-  run_required "Installing base tools with dnf..." dnf install -y curl wget git firewalld nano tar gzip jq bc pciutils util-linux coreutils procps-ng
+  run_required "Installing base tools with dnf..." dnf install -y curl wget git firewalld nano tar gzip zstd jq bc pciutils util-linux coreutils procps-ng
   run_optional "Installing optional diagnostic tool htop..." dnf install -y htop || true
   run_optional "Enabling firewalld..." systemctl enable firewalld || true
   run_optional "Starting firewalld..." systemctl start firewalld || true
@@ -568,6 +888,12 @@ ensure_ai_user() {
   if ! id "$AI_USER" >/dev/null 2>&1; then
     useradd -m -g "$AI_GROUP" -s /bin/bash "$AI_USER"
     record_manifest "AI_USER_CREATED" "1"
+  fi
+  if getent group render >/dev/null 2>&1; then
+    usermod -a -G render "$AI_USER" || true
+  fi
+  if getent group video >/dev/null 2>&1; then
+    usermod -a -G video "$AI_USER" || true
   fi
   record_manifest "AI_USER" "$AI_USER"
   record_manifest "AI_GROUP" "$AI_GROUP"
@@ -600,6 +926,7 @@ install_nvidia_drivers() {
   header
   echo "Installing NVIDIA drivers and CUDA runtime..."
   run_required "Installing NVIDIA packages..." dnf install -y akmod-nvidia xorg-x11-drv-nvidia-cuda
+  enable_nvidia_persistence
   ok "NVIDIA packages installed."
   local ans
   if [ "$ASSUME_YES" = "1" ] && [ "$AUTO_REBOOT" != "1" ]; then
@@ -783,6 +1110,7 @@ install_ollama_official() {
   fi
   rm -f "$installer"
 
+  verify_ollama_runtime_libs
   record_manifest "OLLAMA_INSTALLED_BY_XEMI" "1"
   ok "Ollama installed."
   pause
@@ -806,18 +1134,69 @@ current_ollama_models_dir() {
   default_ollama_models_dir
 }
 
+detect_ollama_llm_library() {
+  local ollama_lib_dir="/usr/local/lib/ollama"
+  local cuda_major=""
+
+  if cmd_exists nvidia-smi && nvidia-smi >/dev/null 2>&1; then
+    cuda_major="$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: \([0-9][0-9]*\).*/\1/p' | head -n 1)"
+  fi
+
+  if [ "$cuda_major" -ge 13 ] 2>/dev/null && [ -d "${ollama_lib_dir}/cuda_v13" ]; then
+    echo "cuda_v13"
+  elif [ -d "${ollama_lib_dir}/cuda_v12" ]; then
+    echo "cuda_v12"
+  elif [ -d "${ollama_lib_dir}/cuda_v13" ]; then
+    echo "cuda_v13"
+  else
+    echo ""
+  fi
+}
+
 write_ollama_override() {
   local port="$1"
   local bind_host="$2"
   local gpu_uuids="$3"
   local models_dir="${4:-}"
 
+  local llm_library
+  local llm_library_path="/usr/local/lib/ollama"
+
+  llm_library="$(detect_ollama_llm_library || true)"
+  if [ -n "$llm_library" ] && [ -d "/usr/local/lib/ollama/$llm_library" ]; then
+    llm_library_path="/usr/local/lib/ollama/$llm_library"
+  fi
+
+  write_ollama_gpu_guard_script
+  write_ollama_gpu_guard_service
   backup_path /etc/systemd/system/ollama.service.d
   mkdir -p /etc/systemd/system/ollama.service.d
   cat > /etc/systemd/system/ollama.service.d/override.conf <<EOF
+[Unit]
+StartLimitIntervalSec=0
+Wants=nvidia-persistenced.service
+Wants=network-online.target
+After=network-online.target systemd-modules-load.service nvidia-persistenced.service
+
 [Service]
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="LD_LIBRARY_PATH=${llm_library_path}:/usr/local/lib/ollama"
+ExecStartPre=/bin/sh -c 'for i in \$(seq 1 180); do if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then exit 0; fi; echo "Esperando NVIDIA GPU... (\$i/180)"; sleep 2; done; echo "NVIDIA GPU no está lista después de 360 segundos"; exit 1'
+TimeoutStartSec=7min
+Restart=on-failure
+RestartSec=10s
 Environment="OLLAMA_HOST=${bind_host}:${port}"
+EOF
+  if [ -n "$llm_library" ]; then
+    cat >> /etc/systemd/system/ollama.service.d/override.conf <<EOF
+Environment="OLLAMA_LLM_LIBRARY=${llm_library}"
+EOF
+  fi
+  cat >> /etc/systemd/system/ollama.service.d/override.conf <<EOF
 Environment="OLLAMA_FLASH_ATTENTION=1"
+Environment="OLLAMA_GPU_OVERHEAD=268435456"
+Environment="OLLAMA_LOAD_TIMEOUT=10m"
+Environment="OLLAMA_KEEP_ALIVE=30m"
 User=${AI_USER}
 Group=${AI_GROUP}
 NoNewPrivileges=true
@@ -830,11 +1209,6 @@ EOF
   if [ -n "$models_dir" ]; then
     cat >> /etc/systemd/system/ollama.service.d/override.conf <<EOF
 Environment="OLLAMA_MODELS=${models_dir}"
-EOF
-  fi
-  if [ -n "$gpu_uuids" ]; then
-    cat >> /etc/systemd/system/ollama.service.d/override.conf <<EOF
-Environment="CUDA_VISIBLE_DEVICES=${gpu_uuids}"
 EOF
   fi
 }
@@ -860,6 +1234,7 @@ configure_ollama_service_lan() {
   ensure_ai_user
   if ensure_nvidia_gpu_ready; then
     gpu_uuids="$(nvidia_gpu_uuids || true)"
+    enable_nvidia_persistence
   elif [ "$ALLOW_CPU_FALLBACK" = "1" ]; then
     warn "Ollama will be configured without confirmed GPU because ALLOW_CPU_FALLBACK=1."
   else
@@ -891,7 +1266,12 @@ configure_ollama_service_lan() {
   OLLAMA_BIND_HOST="$bind_host"
   systemctl daemon-reload
   systemctl enable ollama >/dev/null 2>&1
+  systemctl enable xemi-ollama-gpu-guard.service >/dev/null 2>&1
   systemctl restart ollama
+  ensure_ollama_uses_gpu 1 || {
+    pause
+    return 1
+  }
 
   ok "Ollama service configured on ${bind_host}:${port}."
   pause
@@ -980,7 +1360,12 @@ configure_ollama_models_dir() {
 
   systemctl daemon-reload
   systemctl enable ollama >/dev/null 2>&1
+  systemctl enable xemi-ollama-gpu-guard.service >/dev/null 2>&1
   systemctl restart ollama
+  ensure_ollama_uses_gpu 1 || {
+    pause
+    return 1
+  }
 
   echo "Testing Ollama with new model directory..."
   sleep 3
@@ -1023,6 +1408,221 @@ list_ollama_models() {
   echo "Using: $bin"
   echo ""
   sudo -u "$AI_USER" "$bin" list || "$bin" list || true
+  pause
+}
+
+test_ollama_model_interaction() {
+  header
+  local bin
+  if ! bin="$(choose_ollama_binary)"; then
+    fail "Ollama binary not found."
+    pause
+    return 1
+  fi
+
+  local models
+  models="$({ sudo -u "$AI_USER" "$bin" list 2>/dev/null || "$bin" list 2>/dev/null; } | awk 'NR>1 {print $1}' | sed '/^$/d')"
+  if [ -z "$models" ]; then
+    fail "No Ollama models installed to test."
+    pause
+    return 1
+  fi
+
+  echo "Installed models:"
+  printf '  %s\n' $models
+  echo ""
+  local model
+  model="$(ask "Model to test" "$(printf '%s\n' $models | head -n 1)")"
+  if [ -z "$model" ]; then
+    fail "No model selected."
+    pause
+    return 1
+  fi
+
+  local prompt
+  prompt="$(ask "Prompt to send to model" "Describe en una frase breve qué hace este modelo.")"
+  if [ -z "$prompt" ]; then
+    prompt="Describe en una frase breve qué hace este modelo."
+  fi
+
+  local stream_answer
+  stream_answer="$(ask "Stream response live? yes or no" "no")"
+  if ! [[ "$stream_answer" =~ ^([Yy][Ee][Ss]|[Yy]|[Ss][Ii]|[Ss])$ ]]; then
+    stream_answer="no"
+  fi
+  local stream_mode="no"
+  if [[ "$stream_answer" =~ ^([Yy][Ee][Ss]|[Yy]|[Ss][Ii]|[Ss])$ ]]; then
+    stream_mode="yes"
+  fi
+
+  load_manifest
+  local port="${OLLAMA_PORT:-$OLLAMA_PORT_DEFAULT}"
+  local host="127.0.0.1"
+  local gpu_status="unknown"
+  local gpu_info=""
+  if cmd_exists nvidia-smi && nvidia-smi >/dev/null 2>&1; then
+    gpu_status="ready"
+    gpu_info="$(nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null | sed 's/^/  /')"
+  else
+    gpu_status="not ready"
+  fi
+
+  echo "== Resumen de prueba =="
+  echo "Modelo: $model"
+  echo "Prompt: $prompt"
+  echo "Modo de stream: $stream_mode"
+  echo "Puerto de Ollama: $port"
+  echo "Estado GPU: $gpu_status"
+  if [ -n "$gpu_info" ]; then
+    echo "Detalles de GPU:"
+    echo "$gpu_info"
+  fi
+  echo ""
+
+  local start_ms end_ms elapsed_ms
+  local payload_file
+  local response_file
+  payload_file="$(mktemp)"
+  response_file="$(mktemp)"
+  local stream_flag
+  if [[ "$stream_answer" =~ ^([Yy][Ee][Ss]|[Yy]|[Ss][Ii]|[Ss])$ ]]; then
+    stream_flag=true
+  else
+    stream_flag=false
+  fi
+
+  if cmd_exists python3; then
+    python3 -c 'import json,sys; stream = sys.argv[3].lower() in ("true", "1", "yes", "y"); json.dump({"model": sys.argv[1], "prompt": sys.argv[2], "stream": stream}, sys.stdout)' "$model" "$prompt" "$stream_flag" > "$payload_file"
+  elif cmd_exists python; then
+    python -c 'import json,sys; stream = sys.argv[3].lower() in ("true", "1", "yes", "y"); json.dump({"model": sys.argv[1], "prompt": sys.argv[2], "stream": stream}, sys.stdout)' "$model" "$prompt" "$stream_flag" > "$payload_file"
+  else
+    printf '{"model":"%s","prompt":"%s","stream":%s}' "$(printf '%s' "$model" | json_escape)" "$(printf '%s' "$prompt" | json_escape)" "$stream_flag" > "$payload_file"
+  fi
+
+  echo "Enviando solicitud a Ollama; puede tardar si el modelo es grande."
+  echo "Si el servicio está cargando el modelo o generando, espere por favor."
+
+  start_ms="$(date +%s%3N)"
+  local response
+  local raw_response
+  raw_response=""
+  local rc=0
+  if [ "$stream_flag" = true ]; then
+    echo "Live stream enabled; chunks will appear as they arrive."
+    set +e
+    if cmd_exists stdbuf; then
+      stdbuf -oL curl -S -N -m 300 --connect-timeout 10 -X POST "http://${host}:${port}/api/generate" -H 'Content-Type: application/json' --data-binary @"$payload_file" | tee "$response_file"
+    else
+      curl -S -N -m 300 --connect-timeout 10 -X POST "http://${host}:${port}/api/generate" -H 'Content-Type: application/json' --data-binary @"$payload_file" | tee "$response_file"
+    fi
+    rc=$?
+    set -e
+    raw_response="$(cat "$response_file" 2>/dev/null || true)"
+    response="$raw_response"
+  else
+    echo "Esperando a que el modelo devuelva una respuesta completa..."
+    response="$(curl -sS -m 300 --connect-timeout 10 -X POST "http://${host}:${port}/api/generate" -H 'Content-Type: application/json' --data-binary @"$payload_file" 2>&1)" || rc=$?
+    raw_response="$response"
+  fi
+
+  end_ms="$(date +%s%3N)"
+  elapsed_ms=$((end_ms - start_ms))
+  rm -f "$payload_file" "$response_file"
+
+  local error_message=""
+  local model_output=""
+  local usage=""
+  local latency=""
+  local done_reason=""
+  local created_at=""
+  local total_duration=""
+  local load_duration=""
+  local prompt_eval_duration=""
+  local eval_duration=""
+  if cmd_exists jq; then
+    if [ "$stream_flag" = true ]; then
+      response="$(printf '%s\n' "$raw_response" | jq -R -s 'split("\n") | map(select(length > 0) | fromjson? ) | last' 2>/dev/null || true)"
+    fi
+    if [ -n "$response" ]; then
+      error_message="$(printf '%s' "$response" | jq -r '.error? // empty' 2>/dev/null || true)"
+      model_output="$(printf '%s' "$response" | jq -r '.response? // empty' 2>/dev/null || true)"
+      done_reason="$(printf '%s' "$response" | jq -r '.done_reason? // empty' 2>/dev/null || true)"
+      created_at="$(printf '%s' "$response" | jq -r '.created_at? // empty' 2>/dev/null || true)"
+      total_duration="$(printf '%s' "$response" | jq -r '.total_duration? // empty' 2>/dev/null || true)"
+      load_duration="$(printf '%s' "$response" | jq -r '.load_duration? // empty' 2>/dev/null || true)"
+      prompt_eval_duration="$(printf '%s' "$response" | jq -r '.prompt_eval_duration? // empty' 2>/dev/null || true)"
+      eval_duration="$(printf '%s' "$response" | jq -r '.eval_duration? // empty' 2>/dev/null || true)"
+      usage="$(printf '%s' "$response" | jq -r 'if has("usage") then "prompt_tokens: \(.usage.prompt_tokens // \"n/a\"), completion_tokens: \(.usage.completion_tokens // \"n/a\"), total_tokens: \(.usage.total_tokens // \"n/a\")" elif (has("total_duration") or has("load_duration") or has("prompt_eval_duration") or has("eval_duration")) then "total_duration: \(.total_duration // \"n/a\"), load_duration: \(.load_duration // \"n/a\"), prompt_eval_duration: \(.prompt_eval_duration // \"n/a\"), eval_duration: \(.eval_duration // \"n/a\")" else empty end' 2>/dev/null || true)"
+      latency="$(printf '%s' "$response" | jq -r '.latency? // empty' 2>/dev/null || true)"
+    fi
+  fi
+
+  if [ "$rc" -ne 0 ] || [ -n "$error_message" ]; then
+    if [ -n "$error_message" ]; then
+      fail "Model test request failed: $error_message"
+    else
+      fail "Model test request failed with curl exit code $rc."
+    fi
+    echo "Response output:"
+    if [ -n "$raw_response" ]; then
+      echo "$raw_response" | sed 's/^/  /'
+    else
+      echo "  <no response>"
+    fi
+    pause
+    return 1
+  fi
+
+  local inference_device="unknown"
+  if cmd_exists journalctl; then
+    local olog
+    olog="$(journalctl -u ollama -n 50 --no-pager 2>/dev/null || true)"
+    if printf '%s' "$olog" | grep -Eiq 'cuda|nvidia|ggml_cuda|cublas|cuda_compute|gpu'; then
+      inference_device="GPU"
+    elif printf '%s' "$olog" | grep -Eiq 'CPU|cpu'; then
+      inference_device="CPU"
+    fi
+  fi
+
+  echo "== Resultado de la prueba =="
+  echo "Tiempo transcurrido: ${elapsed_ms} ms"
+  echo "Modo de stream: $stream_mode"
+  echo "Dispositivo de inferencia estimado: $inference_device"
+  if [ -n "$model_output" ]; then
+    echo "Respuesta del modelo:"
+    echo "$model_output" | sed 's/^/  /'
+    echo ""
+  fi
+  if [ -n "$done_reason" ]; then
+    echo "Motivo de finalización: $done_reason"
+  fi
+  if [ -n "$created_at" ]; then
+    echo "Creado en: $created_at"
+  fi
+  if [ -n "$usage" ]; then
+    echo "Resumen de uso: $usage"
+  fi
+  if [ -n "$latency" ]; then
+    echo "Latencia reportada: $latency"
+  fi
+  echo "Respuesta cruda:"
+  if [ -n "$raw_response" ]; then
+    echo "$raw_response" | sed 's/^/  /'
+  else
+    echo "  <respuesta vacía>"
+  fi
+  echo ""
+
+  if cmd_exists journalctl; then
+    echo ""
+    echo "Registros recientes de Ollama para señales GPU/CPU:"
+    if journalctl -u ollama -n 50 --no-pager 2>/dev/null | grep -Eiq 'cuda|nvidia|gpu|ggml_cuda|library=cuda|compute'; then
+      journalctl -u ollama -n 50 --no-pager 2>/dev/null | tail -n 20 | sed 's/^/  /'
+    else
+      echo "  No se encontraron señales explícitas de CUDA/GPU en las últimas 50 líneas del registro de Ollama."
+    fi
+  fi
+
   pause
 }
 
@@ -2067,7 +2667,7 @@ doctor_check_service() {
 }
 
 doctor_check_gpu() {
-  local env_line
+  local mode=""
   if ensure_nvidia_gpu_ready; then
     doctor_ok "NVIDIA GPU is visible through nvidia-smi"
   elif [ "$ALLOW_CPU_FALLBACK" = "1" ]; then
@@ -2078,22 +2678,38 @@ doctor_check_gpu() {
     return 0
   fi
 
-  env_line="$(systemctl show ollama -p Environment --no-pager 2>/dev/null || true)"
-  if echo "$env_line" | grep -q "CUDA_VISIBLE_DEVICES="; then
-    doctor_ok "Ollama service has explicit CUDA_VISIBLE_DEVICES"
+  if verify_ollama_runtime_libs; then
+    doctor_ok "Ollama runtime libraries are present"
   else
-    doctor_warn "Ollama service has no explicit CUDA_VISIBLE_DEVICES; default CUDA visibility may still use all GPUs"
+    doctor_fail "Ollama runtime libraries are incomplete"
+  fi
+
+  mode="$(ollama_current_compute_mode 2>/dev/null || true)"
+  if [ "$mode" = "gpu" ]; then
+    doctor_ok "Ollama bootstrapped with CUDA"
+  elif [ "$mode" = "cpu" ]; then
+    doctor_fail "Ollama bootstrapped in CPU mode despite NVIDIA GPU availability"
+  else
+    doctor_warn "Could not determine Ollama compute mode from current service logs yet"
   fi
 }
 
 doctor_check_http() {
   local name="$1"
   local url="$2"
-  if curl -fsS "$url" >/dev/null 2>&1; then
-    doctor_ok "${name} responds: ${url}"
-  else
-    doctor_fail "${name} does not respond: ${url}"
-  fi
+  local attempts=6
+  local delay=3
+  local i
+
+  for ((i=1; i<=attempts; i++)); do
+    if curl -fsS "$url" >/dev/null 2>&1; then
+      doctor_ok "${name} responds: ${url}"
+      return 0
+    fi
+    sleep "$delay"
+  done
+
+  doctor_fail "${name} does not respond: ${url}"
 }
 
 doctor_check_ollama_gpu_logs() {
@@ -2250,7 +2866,7 @@ full_new_server_setup() {
   header
   echo "Full new server setup"
   echo "This will prepare repositories/tools, ensure NVIDIA GPU readiness, install Ollama, Open WebUI, autostart services, models and firewall rules."
-  local ans
+  local ans existing_action
   ans="$(confirm_proceed "Proceed yes or no" "yes")"
   if ! is_yes "$ans"; then
     warn "Cancelled."
@@ -2272,14 +2888,38 @@ full_new_server_setup() {
     fi
   fi
 
-  full_install_stack
+  if has_existing_installation; then
+    echo ""
+    echo "Existing installation detected."
+    echo "1) Exit without changes"
+    echo "2) Repair and verify the existing installation"
+    existing_action="$(ask "Choose 1 or 2" "2")"
+    case "$existing_action" in
+      1)
+        warn "No changes made."
+        pause
+        return 0
+        ;;
+      2)
+        ok "Running repair and integrity checks instead of a full reinstall."
+        repair_existing_installation
+        ;;
+      *)
+        warn "Invalid choice. No changes made."
+        pause
+        return 0
+        ;;
+    esac
+  else
+    full_install_stack
+  fi
 }
 
 menu() {
   while true; do
     header
     menu_section "Guided Installation"
-    menu_item 1 "Full new server setup (drivers, Ollama, WebUI, GPU, firewall)"
+    menu_item 1 "Full new server setup or repair existing installation (GPU prioritized)"
     menu_item 2 "Stage 1, install NVIDIA drivers and reboot"
     menu_item 3 "Stage 2, install AI stack (Ollama, models, WebUI, firewall)"
     echo ""
@@ -2299,11 +2939,12 @@ menu() {
     menu_item 9 "Configure Ollama models directory / migrate model data"
     menu_item 10 "Recommend and install models (choose set)"
     menu_item 11 "List models"
-    menu_item 12 "Remove models (interactive)"
+    menu_item 12 "Test a model interaction and verify GPU/CPU usage"
+    menu_item 13 "Remove models (interactive)"
     echo ""
 
     menu_section "Ollama Removal"
-    menu_item 13 "Remove Ollama by location (discover multiple and remove)"
+    menu_item 14 "Remove Ollama by location (discover multiple and remove)"
     echo ""
 
     menu_section "Open WebUI"
@@ -2326,11 +2967,11 @@ menu() {
     echo ""
 
     menu_section "Session"
-    menu_item 24 "Exit"
+    menu_item 25 "Exit"
     echo ""
 
     local opt
-    opt="$(ask "Select option" "24")"
+    opt="$(ask "Select option" "25")"
     sleep_screen
 
     case "$opt" in
@@ -2345,19 +2986,20 @@ menu() {
       9) configure_ollama_models_dir ;;
       10) recommend_and_install_models ;;
       11) list_ollama_models ;;
-      12) remove_ollama_models_interactive ;;
-      13) remove_ollama_by_location ;;
-      14) install_python311 ;;
-      15) install_openwebui ;;
-      16) update_openwebui ;;
-      17) openwebui_health_check ;;
-      18) configure_firewall_lan_only ;;
-      19) show_ports_and_services ;;
-      20) show_install_state ;;
-      21) doctor ;;
-      22) uninstall_stack 0 ;;
-      23) uninstall_stack 1 ;;
-      24) exit 0 ;;
+      12) test_ollama_model_interaction ;;
+      13) remove_ollama_models_interactive ;;
+      14) remove_ollama_by_location ;;
+      15) install_python311 ;;
+      16) install_openwebui ;;
+      17) update_openwebui ;;
+      18) openwebui_health_check ;;
+      19) configure_firewall_lan_only ;;
+      20) show_ports_and_services ;;
+      21) show_install_state ;;
+      22) doctor ;;
+      23) uninstall_stack 0 ;;
+      24) uninstall_stack 1 ;;
+      25) exit 0 ;;
       *) warn "Invalid option." ; sleep_screen ;;
     esac
   done
@@ -2370,6 +3012,7 @@ Usage: $0 [command] [options]
 Commands:
   menu        Open interactive menu (default)
   install     Full new server setup
+  repair      Repair and verify existing installation
   stack       Install AI stack only, assuming drivers are ready
   drivers     Install NVIDIA driver stage
   models-dir  Configure/migrate Ollama model storage directory
@@ -2526,6 +3169,7 @@ main() {
   case "$COMMAND" in
     menu) menu ;;
     install|new-server|bootstrap) full_new_server_setup ;;
+    repair) repair_existing_installation ;;
     drivers) full_install_drivers ;;
     stack) full_install_stack ;;
     models-dir) configure_ollama_models_dir ;;
