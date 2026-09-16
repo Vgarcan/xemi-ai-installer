@@ -1,0 +1,18 @@
+name: Shell tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Bash syntax
+        run: |
+          for script in xemi_ai_install.sh lib/*.sh tests/*.sh; do
+            bash -n "$script"
+          done
+      - name: Run non-destructive smoke tests
+        run: bash tests/smoke.sh

@@ -4,6 +4,36 @@ Xemi AI Installer is a guided Linux installer for setting up a fresh AI server w
 
 The goal is simple: a user who does not know where to start should be able to run one command and end up with a working local AI server.
 
+## Project Structure
+
+xemi_ai_install.sh is the starter and command entry point. Its implementation is split by responsibility under lib/:
+
+- config.sh: default paths and environment-backed settings.
+- common.sh: logging, terminal output, prompts, and command wrappers.
+- state.sh: lock handling and the installation manifest.
+- validation.sh: input/configuration validation and safe path operations.
+- system.sh: host checks, repositories, base tools, users, and NVIDIA drivers.
+- ollama.sh: Ollama installation, configuration, models, and GPU integration.
+- openwebui.sh: Python/Open WebUI installation, updates, and health checks.
+- network.sh: LAN firewall and service binding operations.
+- lifecycle.sh: uninstall and purge cleanup.
+- diagnostics.sh: reports and readiness checks.
+- workflows.sh: high-level install, repair, and bootstrap flows.
+- cli.sh: menu, argument parsing, and command dispatch.
+
+Keep the lib/ directory alongside the starter when copying or installing the tool.
+
+## Verification
+
+Run the non-destructive smoke tests from the repository with:
+
+```bash
+bash tests/smoke.sh
+```
+
+They cover argument validation, manifest round-tripping, guarded deletions, and the non-zero failure contract of `doctor`. They do not install packages or start services.
+GitHub Actions also runs Bash syntax checks and these smoke tests on pushes and pull requests. Test an actual update and rollback on a disposable supported Linux VM before using them on a production server.
+
 ## What It Sets Up
 
 The full installer can prepare a new server end to end:
@@ -12,16 +42,16 @@ The full installer can prepare a new server end to end:
 - Enables EPEL and RPM Fusion repositories on supported `dnf`-based systems.
 - Installs NVIDIA driver packages and CUDA runtime packages when the GPU is not ready.
 - Installs Ollama using the official Ollama Linux installer.
-- Configures Ollama as a systemd service with LAN binding and autostart.
+- Configures Ollama as a systemd service with localhost API binding by default and autostart.
 - Configures Ollama GPU-related environment variables when NVIDIA GPUs are detected.
 - Adds basic systemd hardening for the managed Ollama override and Open WebUI service.
 - Offers recommended model sets based on detected VRAM, with an option to skip model downloads.
 - Installs Open WebUI as the official Python package inside a dedicated Python 3.11 virtual environment.
 - Creates an Open WebUI systemd service with autostart.
-- Creates LAN-only `firewalld` rich rules for Ollama and Open WebUI.
+- Creates a LAN `firewalld` rule for Open WebUI; the Ollama API rule is opt-in.
 - Writes an installation manifest so uninstall and purge can remove what was created.
 - Uses a single-run lock to prevent concurrent installer runs from changing the same state.
-- Provides a `doctor` command to verify readiness after installation or reboot.
+- Provides a `doctor` command to verify readiness after installation or reboot, returning a non-zero exit code when readiness checks fail.
 
 ## Supported Systems
 
@@ -297,7 +327,14 @@ sudo /usr/local/bin/xemi_ai_install.sh models-dir
 Check and apply Open WebUI updates:
 
 ```bash
+sudo /usr/local/bin/xemi_ai_install.sh openwebui-check
 sudo /usr/local/bin/xemi_ai_install.sh openwebui-update
+```
+
+Restore the previous release and its matching data snapshot if needed:
+
+```bash
+sudo /usr/local/bin/xemi_ai_install.sh openwebui-rollback
 ```
 
 Remove services and Open WebUI while keeping Ollama binaries and model data:
@@ -338,7 +375,9 @@ Supported options:
 --ollama-port PORT           Set the Ollama port.
 --webui-port PORT            Set the Open WebUI port.
 --lan CIDR                   Set the LAN subnet allowed by firewalld.
---ollama-bind-host HOST      Set the Ollama bind host.
+--firewall-zone ZONE         Choose a firewalld zone when more than one is active.
+--expose-ollama             Bind the Ollama API to all IPv4 interfaces.
+--ollama-bind-host HOST      Set the Ollama bind host (IPv4 address or DNS name).
 --ollama-models-dir PATH     Set a custom Ollama model storage directory.
 --ai-user USER               Set the service user.
 --ai-group GROUP             Set the service group.
@@ -452,6 +491,8 @@ sudo ALLOW_CPU_FALLBACK=1 /usr/local/bin/xemi_ai_install.sh install
 
 The `doctor` command also checks recent Ollama logs for CUDA/GPU-related signals. If no model has been run yet, the logs may not show GPU usage. In that case, run a model and then run `doctor` again.
 
+When CPU fallback is selected, the full install and repair flows skip the NVIDIA driver requirement and configure Ollama without the GPU startup wait. This is intended for servers that deliberately run models on CPU.
+
 ## Ports And Firewall
 
 Default ports:
@@ -477,16 +518,20 @@ Or set the LAN subnet through an environment variable:
 sudo LAN_SUBNET=192.168.1.0/24 /usr/local/bin/xemi_ai_install.sh install
 ```
 
-Firewall rules are stored in the installer manifest so they can be removed later by `uninstall` or `purge`.
+Firewall rules are stored in the installer manifest so they can be removed later by `uninstall` or `purge`. Reconfiguring the firewall replaces the previously recorded Ollama and Open WebUI rules, rather than leaving the old LAN subnet or ports open.
 
-Ollama binds to `0.0.0.0` by default so LAN clients can reach it through the firewall rules. To bind it differently:
+Ollama binds to `127.0.0.1` by default. Open WebUI can reach it locally, while LAN clients cannot access the Ollama API directly. To expose the API to the configured LAN, opt in explicitly:
 
 ```bash
 sudo /usr/local/bin/xemi_ai_install.sh install \
-  --ollama-bind-host 127.0.0.1
+  --expose-ollama --lan 192.168.1.0/24
 ```
 
-If you bind Ollama to localhost only, LAN clients will not be able to reach the Ollama API directly.
+You can also use `--ollama-bind-host HOST`. The firewall rule is added only when Ollama is not bound to localhost. If multiple firewalld zones are active, select the correct one with `--firewall-zone ZONE`. Review existing firewall rules independently: this installer does not remove rules created outside Xemi.
+
+Open WebUI listens on all IPv4 interfaces; its built-in HTTP endpoint has no TLS termination. Put a properly configured HTTPS reverse proxy in front of it before exposing it beyond a trusted LAN.
+
+IPv6 bind addresses are not currently supported by `--ollama-bind-host`; use an IPv4 address or DNS name.
 
 ## Users And Permissions
 
@@ -655,19 +700,9 @@ Open WebUI can be updated through the installer:
 sudo /usr/local/bin/xemi_ai_install.sh openwebui-update
 ```
 
-The update flow:
+`openwebui-check` is read-only and reports the installed and available versions. `openwebui-update` requires a Xemi-managed installation. It prepares a separate virtual environment, checks dependencies, stops the service, copies the full data directory (including the database), activates the candidate, then verifies the service and `/health`. If startup fails, it restores the previous environment and data snapshot automatically. A successful update records both paths for `openwebui-rollback`. Keep enough free space for the complete data copy plus 100 MiB; the service is unavailable while the data is copied and the update is activated.
 
-- Reads the currently installed `open-webui` version from `/opt/open-webui-venv`.
-- Checks PyPI through `pip list --outdated`.
-- Shows the available version change when an update exists.
-- Stops `openwebui` before upgrading.
-- Runs `pip install -U open-webui` inside the existing virtual environment.
-- Reapplies the SQLite compatibility shim used on Alma/RHEL systems.
-- Rewrites the Open WebUI environment and systemd service with the managed settings.
-- Restarts `openwebui`.
-- Waits for `http://127.0.0.1:3000/health` to respond.
-
-If no update is reported, the command still repairs/verifies the managed service settings and runs the health check.
+The rollback command restores the matching data snapshot, so changes made after the update will be lost. Back up newer data separately first. Package checks use the configured pip index, while candidate installation uses isolated pip settings; private/custom indexes require an explicit packaging plan. A healthy `/health` response does not prove every user workflow or database migration is compatible: test logins, chats, and models before treating an upgrade as production-ready.
 
 ## Paths
 
@@ -819,8 +854,7 @@ When applicable, `purge` removes:
 - Open WebUI environment file.
 - Ollama systemd override.
 - Ollama service file.
-- Ollama binaries and libraries discovered by the installer.
-- Ollama model data.
+- Ollama binary recorded as created by Xemi, plus its standard libraries and model data when installation ownership was recorded.
 - firewalld rules recorded in the manifest.
 - Created AI user/group if the installer created them.
 - Installer manifest.
@@ -830,6 +864,8 @@ Before removing important paths, the installer attempts to save backups in:
 ```bash
 /var/lib/xemi-ai/backups
 ```
+
+The installer preserves pre-existing Open WebUI data, external services, and Ollama binaries that it cannot prove it created. For older installations without ownership markers, inspect and remove leftovers manually after taking a backup. `--yes` skips optional model downloads; pull models later with `ollama pull MODEL`.
 
 ## Troubleshooting
 
