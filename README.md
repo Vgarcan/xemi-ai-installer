@@ -15,6 +15,9 @@ xemi_ai_install.sh is the starter and command entry point. Its implementation is
 - system.sh: host checks, repositories, base tools, users, and NVIDIA drivers.
 - ollama.sh: Ollama installation, configuration, models, and GPU integration.
 - openwebui.sh: Python/Open WebUI installation, updates, and health checks.
+- extras.sh: optional Open WebUI tools (Open Terminal, mcpo, SearXNG, Apache Tika).
+- services.sh: status table and control (start/stop/restart, boot, logs, analysis) for managed systemd services.
+- owui_api.sh: Open WebUI admin API client that connects and disconnects the tools.
 - network.sh: LAN firewall and service binding operations.
 - lifecycle.sh: uninstall and purge cleanup.
 - diagnostics.sh: reports and readiness checks.
@@ -191,13 +194,23 @@ Or explicitly:
 sudo /usr/local/bin/xemi_ai_install.sh menu
 ```
 
-For a new server, use:
+The main menu groups operations into submenus. Each line lists what the submenu contains:
 
 ```text
-1) Full new server setup
+ 1) Guided installation  full setup / repair, NVIDIA drivers, AI stack
+ 2) Ollama               install, LAN service, status, health check, remove
+ 3) Models               storage directory, install, list, test, remove
+ 4) Open WebUI           Python 3.11, install, updates, rollback, health check
+ 5) Open WebUI tools     Open Terminal, MCP tools, web search, document extraction
+ 6) Network              LAN firewall, ports and service bindings
+ 7) Services             status and ports, start/stop/restart, logs, GPU, diagnostics
+ 8) Diagnostics          GPU info, doctor check, installation report
+ 9) Uninstall            remove stack (keep Ollama data), purge to zero
+
+ 0) Exit
 ```
 
-The menu also exposes individual operations such as installing drivers, installing the AI stack, configuring firewall rules, checking services, running diagnostics, uninstalling, and purging.
+For a new server, choose `1` and then `1) Full new server setup`. In every submenu, `0` returns to the main menu.
 
 ## Existing Installations
 
@@ -560,7 +573,7 @@ If the installer creates the user or group, it records that fact in the manifest
 
 ## Ollama Model Downloads
 
-During the stack installation, the installer detects available VRAM and offers model sets.
+During the stack installation, the installer detects available VRAM and offers model sets. Any set you install also pulls `qwen2.5:0.5b` (about 0.4 GB), the Open WebUI task model.
 
 Example on a 12 GB GPU:
 
@@ -604,6 +617,19 @@ You can install models later with:
 ```bash
 sudo -u aiuser ollama pull mistral
 ```
+
+## Ollama Model Memory
+
+The installer sets two Ollama defaults for every model:
+
+| Setting | Default | Why |
+|---|---|---|
+| `OLLAMA_CONTEXT_LENGTH` | `16384` | Without it Ollama picks 4096 on a 12 GB GPU, which is too small for web search results and documents and makes long requests fail ("exceeds the available context size"). |
+| `OLLAMA_KV_CACHE_TYPE` | `q8_0` | Halves the K/V cache versus `f16` with negligible quality loss. Requires flash attention, which the installer always enables. |
+
+Change them from `2) Ollama > Tune model memory`, with `sudo /usr/local/bin/xemi_ai_install.sh ollama-tune`, or at install time with `--ollama-context-length N` and `--ollama-kv-cache-type f16|q8_0|q4_0`. Applying restarts Ollama. The values are stored in the manifest, so repair keeps them.
+
+Ollama loads several models at once when they fit in VRAM and unloads the oldest when a new one does not. Count VRAM, not file size: each loaded model adds its K/V cache, compute buffer and CUDA context. Check real usage in `7) Services > GPU usage`. Keep every single model below the free VRAM; a model that does not fit runs partly on the CPU and becomes much slower.
 
 ## Ollama Model Storage
 
@@ -661,6 +687,16 @@ open-webui serve --host 0.0.0.0 --port 3000
 
 On first start, Open WebUI may download embedding assets into its cache before the web port starts responding. The installer waits for `/health`, but on slow connections this may still take several minutes.
 
+A new installation starts with these defaults, written to `/etc/xemi-ai/openwebui.env`:
+
+| Setting | Value | Why |
+|---|---|---|
+| `TASK_MODEL` | `qwen2.5:0.5b` | Titles, tags and search queries run on a small model instead of queueing on the chat model. If it is not pulled, Open WebUI uses the chat model. |
+| `RAG_EMBEDDING_MODEL` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | Multilingual document search (Spanish included), on the CPU so it does not compete for VRAM. |
+| `RAG_TOP_K` / `WEB_SEARCH_RESULT_COUNT` | `5` / `5` | More context per answer, sized for the 16k Ollama context. |
+
+Open WebUI reads these only on its first start and then keeps its own settings in its database, so existing installations are not changed. For an existing installation use `4) Open WebUI > Apply recommended settings` (all but the embedding model, which needs re-indexing of your documents).
+
 Persistent data is stored in:
 
 ```bash
@@ -691,6 +727,67 @@ The service unit is:
 ```bash
 /etc/systemd/system/openwebui.service
 ```
+
+## Open WebUI Tools
+
+Menu group `5) Open WebUI tools` installs optional free and open-source tools that extend Open WebUI. Each one is installed natively (no containers), runs as a hardened systemd service, and listens on `127.0.0.1` only. Open WebUI calls them from its backend, so no firewall rules are added.
+
+How to use the tools in Open WebUI, with diagrams, for users and administrators (Spanish): [docs/GUIA_HERRAMIENTAS.md](docs/GUIA_HERRAMIENTAS.md).
+
+| Tool | Command | Port | What it adds | Service user |
+|---|---|---|---|---|
+| Open Terminal | `open-terminal` | 8000 | Shell, file browser and code execution for models | `aiterminal` |
+| mcpo | `mcpo` | 8001 | MCP servers `time` and `fetch` as OpenAPI tool servers | `aitools` |
+| SearXNG | `searxng` | 8888 | Private web search without paid APIs | `aitools` |
+| Apache Tika | `tika` | 9998 | PDF/Word/Excel text extraction for documents and RAG | `aitools` |
+
+```bash
+sudo /usr/local/bin/xemi_ai_install.sh searxng
+sudo /usr/local/bin/xemi_ai_install.sh tools-status
+sudo /usr/local/bin/xemi_ai_install.sh tools-update
+```
+
+### Connecting the tools to Open WebUI
+
+Open WebUI keeps these settings in its database, where environment variables no longer apply after the first start. The installer therefore connects the tools through Open WebUI's admin API:
+
+- After each install it asks "Connect ... to Open WebUI now". `5) Open WebUI tools > Connect installed tools to Open WebUI` (or `tools-connect`) connects or refreshes all installed tools at once.
+- It asks for an Open WebUI administrator e-mail and password for that step only. They are never stored; the session token stays in memory and is not visible in the process list.
+- Only entries created by the installer (ids starting with `xemi-`) are added, refreshed or removed. Your own connections are kept, and so are access grants you gave to the installer's entries. New Open Terminal and tool server connections are admin-only until you grant groups access.
+- Before writing, it checks that each API response has the expected shape. If Open WebUI changed its API, nothing is written and the manual values below are shown.
+- Unattended runs (`--yes`) skip this step.
+
+`4) Open WebUI > Apply recommended settings` sets the task model to `qwen2.5:0.5b`, and documents Top K and web search results to 5, through the same API. It does not change the embedding model, because that requires re-indexing your documents.
+
+Manual values, also printed by `tools-status`:
+
+- Open Terminal: Admin settings > Integrations > Open Terminal, URL `http://127.0.0.1:8000`, Bearer key from `/etc/xemi-ai/open-terminal.env`. Set Function Calling to Native in the model settings.
+- mcpo: Admin settings > Integrations > Manage Tool Servers, one OpenAPI connection per server (`http://127.0.0.1:8001/time`, `http://127.0.0.1:8001/fetch`), Bearer key from `/etc/xemi-ai/mcpo.env`. Add more MCP servers in `/etc/mcpo/config.json`.
+- SearXNG: Admin settings > Web Search, engine `searxng`, query URL `http://127.0.0.1:8888/search?q=<query>`.
+- Apache Tika: Admin settings > Documents, Content Extraction Engine `Tika`, URL `http://127.0.0.1:9998`.
+
+Security notes:
+
+- Every tool service runs with an extra sandbox drop-in (`/etc/systemd/system/<tool>.service.d/xemi-hardening.conf`): no capabilities, private `/dev`, system-call filter, restricted namespaces and address families. Verified with all four tools; `systemd-analyze security` drops from 7.4 (MEDIUM) to 1.5 (OK). `Update installed tools` applies it to existing installs.
+
+- Open Terminal lets connected models run commands as `aiterminal`. That user has no sudo, sees the system read-only, can write only to `/var/lib/open-terminal`, cannot see `/home` or other users' processes. It can still read world-readable files and reach the network.
+- mcpo accepts its API key only as a command-line argument. The tool services run with `ProtectProc=invisible`, so the Open Terminal user cannot see other users' processes or that key; other local login users can still see it in the process list.
+- SearXNG follows the upstream main branch; the installed commit is recorded in the manifest, and `tools-update` returns to the previous commit if the new one fails to install or start. Apache Tika is pinned to a release verified by SHA512 and uses Java 21 from the distribution.
+
+### Removing tools without leaving traces
+
+`Remove tools` (and `uninstall`/`purge`) leave the server as it was before the tool was installed:
+
+- The service, its unit, venv or jar, configuration directory and API key file.
+- The `aiterminal`/`aitools` users, their groups and home directories, once no installed tool needs them (only users this installer created).
+- System packages the tool installed (Java 21 for Tika, git for SearXNG if it was missing). The installer records exactly which RPMs each install added and removes them only if `rpm -e --test` confirms nothing else needs them now; otherwise it keeps them and says so.
+- Its manifest entries. Python packages are installed with `--no-cache-dir`, so nothing is added to root's pip cache.
+
+The one exception is user work: if the Open Terminal workspace (`/var/lib/open-terminal`) contains files beyond the shell skeleton, history and Open Terminal logs, the installer asks before deleting it (default: keep) and keeps `aiterminal` as their owner. `purge` deletes it without asking.
+
+Removing tools also offers to delete their Open WebUI connections with one admin login: Open Terminal and mcpo entries are removed, and web search or content extraction are set back to Open WebUI's defaults, but only while they still point to this installer's tools. If you skip that step, each removal prints where to delete the connection by hand. `purge` skips it when it deletes the Open WebUI data itself. The only thing left outside the installer's reach is the systemd journal, which rotates on its own.
+
+Running `Remove tools` with no tools installed also cleans up service users left behind by older versions of this installer.
 
 ## Open WebUI Updates
 
@@ -766,6 +863,19 @@ Ollama systemd override:
 /etc/systemd/system/ollama.service.d/override.conf
 ```
 
+## Services
+
+Menu group `7) Services` shows and controls every systemd unit the installer creates or relies on: `ollama`, `xemi-ollama-gpu-guard`, `openwebui`, the installed Open WebUI tools, `nvidia-persistenced` and `firewalld`. Units that do not exist on the host are not listed.
+
+- Show status of all services: state, start at boot, PID, memory, automatic restarts, error log lines in the last 24 hours, HTTP health and start time. Problem rows are shown in yellow or red. Also available as `sudo /usr/local/bin/xemi_ai_install.sh services`.
+- Manage a service: start, stop, restart (with a health check), enable or disable at boot, browse or follow the log, errors since the last boot, the unit file with its overrides, and `systemd-analyze security` exposure analysis. Stopping or disabling asks for confirmation and explains the impact (for example, stopping `firewalld` removes the LAN-only protection).
+- Restart AI services: restarts Ollama, Open WebUI and the tools in order and checks that each one responds.
+- GPU usage (`gpu` command): utilization, memory, temperature and power per GPU, VRAM used by each service, and the models loaded in Ollama with how much of each runs on the GPU.
+- Boot timeline: total boot time, how long each managed service took to start, and what Ollama and Open WebUI waited for.
+- Export diagnostic bundle (`diag-bundle` command): status, versions, doctor, install report, ports, firewall, unit files and last-boot logs of every service, plus the installer log, in `/var/lib/xemi-ai/diagnostics/xemi-diag-<host>-<time>.tar.gz` (mode 600). API keys, tokens, passwords and e-mail addresses are redacted; review it before sharing.
+
+The status table also lists the TCP addresses each service listens on (`LISTEN`), read from the processes in the service's cgroup, so it shows the real port even if it was changed during installation.
+
 ## Diagnostics
 
 Run:
@@ -787,6 +897,11 @@ The doctor check verifies:
 - `openwebui` is running.
 - Open WebUI responds at `/health`.
 - firewalld rules recorded by the installer still exist.
+- Ollama runs with the context length and K/V cache recorded in the manifest (warning: run `ollama-tune`).
+- Ollama bind address (warning when it listens on all interfaces).
+- Each installed Open WebUI tool is running, responds, and has its hardening drop-in (warning: run `tools-update`).
+
+Warnings do not make the doctor fail; they point to settings worth reviewing.
 
 Useful manual checks:
 
@@ -856,10 +971,11 @@ When applicable, `purge` removes:
 - Ollama service file.
 - Ollama binary recorded as created by Xemi, plus its standard libraries and model data when installation ownership was recorded.
 - firewalld rules recorded in the manifest.
-- Created AI user/group if the installer created them.
-- Installer manifest.
+- Open WebUI tools (Open Terminal, mcpo, SearXNG, Apache Tika), including the Open Terminal workspace.
+- Created AI user/group and the `aiterminal`/`aitools` users if the installer created them.
+- Installer manifest and `/etc/xemi-ai`.
 
-Before removing important paths, the installer attempts to save backups in:
+Before removing important paths, the installer saves backups in the directory below. `purge` keeps these backups and the log in `/var/log/xemi-ai`; delete both manually once you no longer need them:
 
 ```bash
 /var/lib/xemi-ai/backups

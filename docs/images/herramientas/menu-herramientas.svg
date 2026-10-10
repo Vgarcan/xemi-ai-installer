@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="290" viewBox="0 0 760 290" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif">
+  <title>Esquema del menú Herramientas con las herramientas MCP time y fetch</title>
+  <style>
+    .card { fill: #ffffff; stroke: #d0d5dd; }
+    .title { font-size: 14px; font-weight: 600; fill: #1f2937; }
+    .note { font-size: 12px; fill: #6b7280; }
+    .sec { font-size: 12px; fill: #6b7280; font-weight: 600; }
+    .item { font-size: 14px; fill: #374151; }
+    .desc { font-size: 12px; fill: #6b7280; }
+    .on { fill: #2563eb; }
+    .knob { fill: #ffffff; }
+    .num { fill: #2563eb; }
+    .numt { font-size: 12px; fill: #ffffff; font-weight: 700; }
+    .leg { font-size: 13px; fill: #1f2937; }
+    .legb { font-size: 13px; fill: #1f2937; font-weight: 600; }
+    .lead { stroke: #2563eb; stroke-width: 1.5; fill: none; }
+  </style>
+  <rect x="0.5" y="0.5" width="759" height="289" rx="12" fill="#f8f9fb" stroke="#e5e7eb"/>
+  <text x="24" y="32" class="title">Menú Herramientas: herramientas MCP (mcpo)</text>
+  <text x="736" y="32" class="note" text-anchor="end">Esquema · textos de Open WebUI 0.11.3</text>
+
+  <rect x="24" y="52" width="330" height="200" rx="12" class="card"/>
+  <text x="44" y="80" class="sec">Herramientas Disponibles</text>
+  <text x="44" y="108" class="sec">Servidores de Herraientas</text>
+
+  <text x="44" y="142" class="item">time (mcpo)</text>
+  <text x="44" y="160" class="desc">Hora y zonas horarias</text>
+  <rect x="290" y="134" width="40" height="22" rx="11" class="on"/><circle cx="319" cy="145" r="8" class="knob"/>
+
+  <text x="44" y="198" class="item">fetch (mcpo)</text>
+  <text x="44" y="216" class="desc">Leer el contenido de una página web</text>
+  <rect x="290" y="190" width="40" height="22" rx="11" class="on"/><circle cx="319" cy="201" r="8" class="knob"/>
+
+  <circle cx="380" cy="172" r="10" class="num"/><text x="380" y="176" class="numt" text-anchor="middle">1</text>
+  <path d="M370 172 H340" class="lead"/>
+  <text x="400" y="150" class="legb">Activa las herramientas para este chat</text>
+  <text x="400" y="170" class="leg">El modelo decide cuándo llamarlas. Pide cosas como:</text>
+  <text x="400" y="190" class="leg">«¿Qué hora es ahora en Tokio?»</text>
+  <text x="400" y="208" class="leg">«Resume esta página: https://…»</text>
+
+  <text x="24" y="274" class="note">Si el menú está vacío, tu usuario no tiene acceso: pídeselo al administrador (ver sección Administración).</text>
+</svg>

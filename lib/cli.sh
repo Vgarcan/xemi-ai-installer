@@ -13,6 +13,8 @@ show_dry_run_plan() {
   echo "  LAN subnet: ${LAN_SUBNET_DEFAULT}"
   echo "  Firewall zone: ${FIREWALL_ZONE:-auto}"
   echo "  Ollama bind host: ${OLLAMA_BIND_HOST}"
+  echo "  Ollama context length: ${OLLAMA_CONTEXT_LENGTH}"
+  echo "  Ollama K/V cache type: ${OLLAMA_KV_CACHE_TYPE}"
   if [ -n "$OLLAMA_MODELS_DIR" ]; then
     echo "  Ollama models directory: ${OLLAMA_MODELS_DIR}"
   else
@@ -103,7 +105,25 @@ show_dry_run_plan() {
       echo "  3. Remove Ollama only if recorded as installer-created."
       echo "  4. Remove created user/group and manifest."
       ;;
-    doctor|status|state|report|info|menu)
+    open-terminal|mcpo|searxng|tika)
+      echo "Plan:"
+      echo "  1. Ensure Python 3.11 (or Java 21 for tika) and a dedicated service user."
+      echo "  2. Install ${cmd} natively under /opt with a pinned or latest upstream release."
+      echo "  3. Create a hardened systemd service listening on 127.0.0.1 only."
+      echo "  4. Start it, verify its health endpoint, and print Open WebUI connection settings."
+      ;;
+    ollama-tune)
+      echo "Plan: write OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH} and OLLAMA_KV_CACHE_TYPE=${OLLAMA_KV_CACHE_TYPE}"
+      echo "      into the Ollama systemd override, record them in the manifest and restart Ollama."
+      ;;
+    tools-update)
+      echo "Plan: update installed Open WebUI tools in place, refresh their hardening and restart them."
+      ;;
+    diag-bundle)
+      echo "Plan: collect status, units, logs and reports, redact secrets and e-mails, and write"
+      echo "      ${DIAG_DIR}/xemi-diag-<host>-<time>.tar.gz (mode 600)."
+      ;;
+    doctor|status|state|report|info|menu|tools-status|services|gpu)
       echo "Plan: run read-oriented command '${cmd}'."
       ;;
     *)
@@ -112,93 +132,128 @@ show_dry_run_plan() {
   esac
 }
 
-menu() {
+# Shows a numbered submenu until the user picks 0. Each entry is "Label|command args".
+run_submenu() {
+  local title="$1"
+  shift
+  local -a labels=() actions=()
+  local entry i opt rc
+  for entry in "$@"; do
+    labels+=("${entry%%|*}")
+    actions+=("${entry#*|}")
+  done
+
   while true; do
     header
-    menu_section "Guided Installation"
-    menu_item 1 "Full new server setup or repair existing installation (GPU prioritized)"
-    menu_item 2 "Stage 1, install NVIDIA drivers and reboot"
-    menu_item 3 "Stage 2, install AI stack (Ollama, models, WebUI, firewall)"
+    menu_section "$title"
+    for i in "${!labels[@]}"; do
+      menu_item "$((i + 1))" "${labels[$i]}"
+    done
+    echo ""
+    menu_item 0 "Back"
     echo ""
 
-    menu_section "Hardware And Status"
-    menu_item 4 "Show GPU info and recommendations"
-    menu_item 5 "Show Ollama status, service, location"
-    echo ""
-
-    menu_section "Ollama Service"
-    menu_item 6 "Install Ollama (official installer)"
-    menu_item 7 "Configure Ollama service for LAN"
-    menu_item 8 "Ollama health check"
-    echo ""
-
-    menu_section "Models"
-    menu_item 9 "Configure Ollama models directory / migrate model data"
-    menu_item 10 "Recommend and install models (choose set)"
-    menu_item 11 "List models"
-    menu_item 12 "Test a model interaction and verify GPU/CPU usage"
-    menu_item 13 "Remove models (interactive)"
-    echo ""
-
-    menu_section "Ollama Removal"
-    menu_item 14 "Remove Ollama by location (discover multiple and remove)"
-    echo ""
-
-    menu_section "Open WebUI"
-    menu_item 15 "Install Python 3.11"
-    menu_item 16 "Install Open WebUI (Python 3.11 venv service)"
-    menu_item 17 "Check/apply Open WebUI updates"
-    menu_item 18 "Open WebUI health check"
-    echo ""
-
-    menu_section "Network"
-    menu_item 19 "Configure firewall (LAN only)"
-    menu_item 20 "Show ports in use and service bindings"
-    echo ""
-
-    menu_section "Diagnostics And Maintenance"
-    menu_item 21 "Show detailed installation report"
-    menu_item 22 "Run doctor readiness check"
-    menu_item 23 "Uninstall stack (keep Ollama data)"
-    menu_item 24 "Purge stack (reset to zero)"
-    menu_item 25 "Rollback last Open WebUI update"
-    echo ""
-
-    menu_section "Session"
-    menu_item 26 "Exit"
-    echo ""
-
-    local opt
-    opt="$(ask "Select option" "26")"
+    opt="$(ask "Select option" "0")"
     sleep_screen
 
     case "$opt" in
-      1) full_new_server_setup ;;
-      2) full_install_drivers ;;
-      3) full_install_stack ;;
-      4) gpu_info_and_recommendations ;;
-      5) show_ollama_status_and_location ;;
-      6) install_ollama_official ;;
-      7) configure_ollama_service_lan ;;
-      8) ollama_health_check ;;
-      9) configure_ollama_models_dir ;;
-      10) recommend_and_install_models ;;
-      11) list_ollama_models ;;
-      12) test_ollama_model_interaction ;;
-      13) remove_ollama_models_interactive ;;
-      14) remove_ollama_by_location ;;
-      15) install_python311 ;;
-      16) install_openwebui ;;
-      17) update_openwebui ;;
-      18) openwebui_health_check ;;
-      19) configure_firewall_lan_only ;;
-      20) show_ports_and_services ;;
-      21) show_install_state ;;
-      22) doctor ;;
-      23) uninstall_stack 0 ;;
-      24) uninstall_stack 1 ;;
-      25) rollback_openwebui ;;
-      26) exit 0 ;;
+      0) return 0 ;;
+      ''|*[!0-9]*) warn "Invalid option." ; sleep_screen ;;
+      *)
+        opt=$((10#$opt))
+        if [ "$opt" -ge 1 ] && [ "$opt" -le "${#actions[@]}" ]; then
+          # Run the action in a subshell with errexit on, so an unexpected error still stops
+          # the action, but a failed action returns here instead of closing the installer.
+          # Actions reload the manifest themselves; word splitting passes their arguments.
+          set +e
+          (set -e; ${actions[$((opt - 1))]})
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            warn "The action did not complete (exit ${rc}). Details: ${LOG_FILE}"
+            pause
+          fi
+        else
+          warn "Invalid option." ; sleep_screen
+        fi
+        ;;
+    esac
+  done
+}
+
+menu() {
+  while true; do
+    header
+    menu_section "Main Menu"
+    menu_group 1 "Guided installation" "full setup / repair, NVIDIA drivers, AI stack"
+    menu_group 2 "Ollama" "install, LAN service, model memory, status, health, remove"
+    menu_group 3 "Models" "storage directory, install, list, test, remove"
+    menu_group 4 "Open WebUI" "Python 3.11, install, updates, rollback, health check"
+    menu_group 5 "Open WebUI tools" "Open Terminal, MCP tools, web search, document extraction"
+    menu_group 6 "Network" "LAN firewall, ports and service bindings"
+    menu_group 7 "Services" "status and ports, start/stop/restart, logs, GPU, diagnostics"
+    menu_group 8 "Diagnostics" "GPU info, doctor check, installation report"
+    menu_group 9 "Uninstall" "remove stack (keep Ollama data), purge to zero"
+    echo ""
+    menu_item 0 "Exit"
+    echo ""
+
+    local opt
+    opt="$(ask "Select option" "0")"
+    sleep_screen
+
+    case "$opt" in
+      1) run_submenu "Guided Installation" \
+           "Full new server setup or repair existing installation (GPU prioritized)|full_new_server_setup" \
+           "Stage 1, install NVIDIA drivers and reboot|full_install_drivers" \
+           "Stage 2, install AI stack (Ollama, models, WebUI, firewall)|full_install_stack" ;;
+      2) run_submenu "Ollama" \
+           "Install Ollama (official installer)|install_ollama_official" \
+           "Configure Ollama service for LAN|configure_ollama_service_lan" \
+           "Tune model memory (context length, K/V cache)|tune_ollama_memory" \
+           "Show Ollama status, service, location|show_ollama_status_and_location" \
+           "Ollama health check|ollama_health_check" \
+           "Remove Ollama by location (discover multiple and remove)|remove_ollama_by_location" ;;
+      3) run_submenu "Models" \
+           "Configure Ollama models directory / migrate model data|configure_ollama_models_dir" \
+           "Recommend and install models (choose set)|recommend_and_install_models" \
+           "List models|list_ollama_models" \
+           "Test a model interaction and verify GPU/CPU usage|test_ollama_model_interaction" \
+           "Remove models (interactive)|remove_ollama_models_interactive" ;;
+      4) run_submenu "Open WebUI" \
+           "Install Python 3.11|install_python311" \
+           "Install Open WebUI (Python 3.11 venv service)|install_openwebui" \
+           "Check/apply Open WebUI updates|update_openwebui" \
+           "Rollback last Open WebUI update|rollback_openwebui" \
+           "Open WebUI health check|openwebui_health_check" \
+           "Apply recommended settings (task model, documents, web search)|apply_openwebui_recommended_settings" ;;
+      5) run_submenu "Open WebUI Tools" \
+           "Install Open Terminal (shell, files and code execution for models)|install_open_terminal" \
+           "Install mcpo (MCP tools: time, web page fetch)|install_mcpo" \
+           "Install SearXNG (private web search)|install_searxng" \
+           "Install Apache Tika (PDF/Office text extraction)|install_tika" \
+           "Connect installed tools to Open WebUI|connect_openwebui_extras" \
+           "Show tools status and Open WebUI connection settings|show_openwebui_extras_status" \
+           "Update installed tools|update_openwebui_extras" \
+           "Remove tools (interactive)|remove_openwebui_extras_interactive" ;;
+      6) run_submenu "Network" \
+           "Configure firewall (LAN only)|configure_firewall_lan_only" \
+           "Show ports in use and service bindings|show_ports_and_services" ;;
+      7) run_submenu "Services" \
+           "Show status of all services|show_services_status" \
+           "Manage a service (start, stop, restart, boot, logs, analysis)|manage_service" \
+           "Restart AI services (Ollama, Open WebUI, tools)|restart_ai_services" \
+           "GPU usage by service and models loaded in Ollama|show_gpu_usage" \
+           "Boot timeline (what delays startup)|show_boot_timeline" \
+           "Export diagnostic bundle (redacted .tar.gz)|export_diagnostic_bundle" ;;
+      8) run_submenu "Diagnostics" \
+           "Show GPU info and recommendations|gpu_info_and_recommendations" \
+           "Run doctor readiness check|doctor" \
+           "Show detailed installation report|show_install_state" ;;
+      9) run_submenu "Uninstall" \
+           "Uninstall stack (keep Ollama data)|uninstall_stack 0" \
+           "Purge stack (reset to zero)|uninstall_stack 1" ;;
+      0) exit 0 ;;
       *) warn "Invalid option." ; sleep_screen ;;
     esac
   done
@@ -215,12 +270,27 @@ Commands:
   stack       Install AI stack only, assuming drivers are ready
   drivers     Install NVIDIA driver stage
   models-dir  Configure/migrate Ollama model storage directory
+  ollama-tune Set context length and K/V cache type for all models
   openwebui-update
               Prepare and apply a checked Open WebUI update
   openwebui-check
               Check for updates without changing the installation
   openwebui-rollback
               Restore the previous Open WebUI release and data snapshot
+  open-terminal
+              Install Open Terminal for Open WebUI
+  mcpo        Install mcpo MCP tool proxy (time, fetch)
+  searxng     Install SearXNG private web search
+  tika        Install Apache Tika document extraction
+  tools-status
+              Show Open WebUI tools and connection settings
+  tools-connect
+              Connect installed tools to Open WebUI (asks for an admin login)
+  services    Show status and ports of all managed systemd services
+  gpu         Show GPU usage by service and models loaded in Ollama
+  diag-bundle Export a redacted diagnostic bundle (.tar.gz)
+  tools-update
+              Update installed Open WebUI tools
   doctor      Run readiness checks
   uninstall   Remove services/Open WebUI, keep Ollama data
   purge       Reset installation to zero
@@ -238,6 +308,8 @@ Options:
   --ollama-bind-host HOST      Set Ollama bind host (IPv4/DNS; default: ${OLLAMA_BIND_HOST})
   --expose-ollama              Bind Ollama to all interfaces for direct LAN access
   --ollama-models-dir PATH     Set custom Ollama model directory
+  --ollama-context-length N    Default context for all models (default: ${OLLAMA_CONTEXT_LENGTH_DEFAULT})
+  --ollama-kv-cache-type TYPE  K/V cache type: f16, q8_0, q4_0 (default: ${OLLAMA_KV_CACHE_TYPE_DEFAULT})
   --ai-user USER               Set service user (default: ${AI_USER})
   --ai-group GROUP             Set service group (default: ${AI_GROUP})
   --openwebui-package PACKAGE  Set pip package, for example open-webui==0.7.2
@@ -307,6 +379,20 @@ parse_args() {
         OLLAMA_BIND_HOST="0.0.0.0"
         OLLAMA_BIND_HOST_FROM_CLI=1
         shift
+        ;;
+      --ollama-context-length)
+        [ "$#" -ge 2 ] || { echo "Missing value for --ollama-context-length"; exit 1; }
+        validate_context_length "$2" || { echo "Invalid --ollama-context-length (2048-262144): $2"; exit 1; }
+        OLLAMA_CONTEXT_LENGTH="$2"
+        OLLAMA_CONTEXT_LENGTH_FROM_CLI=1
+        shift 2
+        ;;
+      --ollama-kv-cache-type)
+        [ "$#" -ge 2 ] || { echo "Missing value for --ollama-kv-cache-type"; exit 1; }
+        validate_kv_cache_type "$2" || { echo "Invalid --ollama-kv-cache-type (f16, q8_0, q4_0): $2"; exit 1; }
+        OLLAMA_KV_CACHE_TYPE="$2"
+        OLLAMA_KV_CACHE_TYPE_FROM_CLI=1
+        shift 2
         ;;
       --ollama-models-dir)
         [ "$#" -ge 2 ] || { echo "Missing value for --ollama-models-dir"; exit 1; }
@@ -401,9 +487,20 @@ main() {
     drivers) full_install_drivers ;;
     stack) full_install_stack ;;
     models-dir) configure_ollama_models_dir ;;
+    ollama-tune) tune_ollama_memory ;;
     openwebui-update|webui-update) update_openwebui ;;
     openwebui-check|webui-check) openwebui_check_updates ;;
     openwebui-rollback|webui-rollback) rollback_openwebui ;;
+    open-terminal) install_open_terminal ;;
+    mcpo) install_mcpo ;;
+    searxng) install_searxng ;;
+    tika) install_tika ;;
+    tools-status) show_openwebui_extras_status ;;
+    tools-connect) connect_openwebui_extras ;;
+    services) show_services_status ;;
+    gpu) show_gpu_usage ;;
+    diag-bundle) export_diagnostic_bundle ;;
+    tools-update) update_openwebui_extras ;;
     doctor) doctor ;;
     uninstall) uninstall_stack 0 ;;
     purge) uninstall_stack 1 ;;

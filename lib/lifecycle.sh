@@ -103,20 +103,24 @@ remove_ollama_installation() {
   fi
 
   if [ "$purge" = "1" ] && [ "${OLLAMA_INSTALLED_BY_XEMI:-}" = "1" ]; then
-    case "${OLLAMA_BINARY_PATH:-}" in
-      /usr/local/bin/ollama|/usr/bin/ollama)
-        rm -f -- "$OLLAMA_BINARY_PATH"
-        ok "Ollama binary removed: $OLLAMA_BINARY_PATH"
-        ;;
-      *) warn "No safe recorded Ollama binary path; binary kept." ;;
-    esac
+    local lib_dir
+    if lib_dir="$(ollama_lib_dir_for_binary "${OLLAMA_BINARY_PATH:-}")"; then
+      rm -f -- "$OLLAMA_BINARY_PATH"
+      safe_rm_rf "$lib_dir" "$(dirname "$lib_dir")"
+      ok "Ollama binary removed: $OLLAMA_BINARY_PATH"
+    else
+      warn "No safe recorded Ollama binary path; binary kept."
+    fi
 
     backup_path /etc/systemd/system/ollama.service
     rm -f /etc/systemd/system/ollama.service
-    safe_rm_rf /usr/local/lib/ollama /usr/local/lib
     safe_rm_rf /usr/share/ollama /usr/share
     safe_rm_rf /var/lib/ollama /var/lib
     safe_rm_rf "/home/${AI_USER}/.ollama" /home
+    if [ "${OLLAMA_USER_CREATED_BY_XEMI:-}" = "1" ]; then
+      userdel -r ollama >/dev/null 2>&1 || userdel ollama >/dev/null 2>&1 || true
+      groupdel ollama >/dev/null 2>&1 || true
+    fi
     ok "Ollama service, libraries and model data removed."
   elif [ "$purge" = "1" ]; then
     warn "Ollama binary and data are not recorded as Xemi-owned; keeping them."
@@ -147,9 +151,9 @@ uninstall_stack() {
   load_manifest
 
   if [ "$purge" = "1" ]; then
-    echo "This will purge services, Open WebUI, Ollama binaries/data, firewall rules and created user."
+    echo "This will purge services, Open WebUI, Open WebUI tools, Ollama binaries/data, firewall rules and created users."
   else
-    echo "This will uninstall services, Open WebUI venv and firewall rules while keeping Ollama binaries/models."
+    echo "This will uninstall services, Open WebUI venv, Open WebUI tools and firewall rules while keeping Ollama binaries/models."
   fi
 
   local ans
@@ -161,6 +165,7 @@ uninstall_stack() {
   fi
 
   remove_firewall_configuration
+  remove_openwebui_extras "$purge"
   remove_openwebui_installation "$purge"
   remove_ollama_installation "$purge"
   systemctl daemon-reload || true
@@ -171,6 +176,9 @@ uninstall_stack() {
     rm -f "$MANIFEST_FILE"
     safe_rm_rf "$CONFIG_DIR" /etc
     ok "Purge completed."
+    # Keep backups (they hold the removed Open WebUI data), the run lock and the log.
+    echo "Backups kept in ${BACKUP_DIR} and the log in ${LOG_DIR}."
+    echo "Delete them when no longer needed: rm -rf ${STATE_DIR} ${LOG_DIR}"
   else
     ok "Uninstall completed."
   fi

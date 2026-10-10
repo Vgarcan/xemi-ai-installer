@@ -108,7 +108,7 @@ install_openwebui() {
     return 1
   fi
 
-  write_openwebui_sqlite_compat
+  write_sqlite_compat "$OPENWEBUI_VENV"
 
   if [ ! -e "$OPENWEBUI_DATA_DIR" ]; then
     mkdir -p "$OPENWEBUI_DATA_DIR"
@@ -152,9 +152,10 @@ install_openwebui() {
   pause
 }
 
-write_openwebui_sqlite_compat() {
+write_sqlite_compat() {
+  local venv="$1"
   local site_packages
-  site_packages="$("$OPENWEBUI_VENV/bin/python" -c 'import site; print(site.getsitepackages()[0])')"
+  site_packages="$("$venv/bin/python" -c 'import site; print(site.getsitepackages()[0])')"
   cat > "${site_packages}/sitecustomize.py" <<'EOF'
 try:
     import sys
@@ -181,6 +182,12 @@ XDG_CACHE_HOME=${OPENWEBUI_DATA_DIR}/cache
 HF_HOME=${OPENWEBUI_DATA_DIR}/cache/huggingface
 SENTENCE_TRANSFORMERS_HOME=${OPENWEBUI_DATA_DIR}/cache/sentence-transformers
 TRANSFORMERS_CACHE=${OPENWEBUI_DATA_DIR}/cache/transformers
+# First-start defaults: Open WebUI stores them in its database and ignores these lines afterwards.
+# A missing task model falls back to the chat model, so a server without it keeps working.
+TASK_MODEL=${OPENWEBUI_TASK_MODEL}
+RAG_EMBEDDING_MODEL=${OPENWEBUI_EMBEDDING_MODEL}
+RAG_TOP_K=${OPENWEBUI_RAG_TOP_K}
+WEB_SEARCH_RESULT_COUNT=${OPENWEBUI_WEB_SEARCH_RESULT_COUNT}
 EOF
   chmod 640 "$OPENWEBUI_ENV_FILE"
 }
@@ -399,10 +406,7 @@ update_openwebui() {
     safe_rm_rf "$candidate" /opt
     return 1
   fi
-  local saved_venv="$OPENWEBUI_VENV"
-  OPENWEBUI_VENV="$candidate"
-  write_openwebui_sqlite_compat
-  OPENWEBUI_VENV="$saved_venv"
+  write_sqlite_compat "$candidate"
   chown -R "$AI_USER:$AI_GROUP" "$candidate"
 
   if ! systemctl stop openwebui; then

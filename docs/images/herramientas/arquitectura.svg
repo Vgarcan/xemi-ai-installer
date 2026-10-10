@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="400" viewBox="0 0 760 400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif">
+  <title>Cómo se conectan Open WebUI, Ollama y las herramientas en el servidor</title>
+  <style>
+    .title { font-size: 14px; font-weight: 600; fill: #1f2937; }
+    .note { font-size: 12px; fill: #6b7280; }
+    .zone { fill: #ffffff; stroke: #d0d5dd; stroke-dasharray: 5 4; }
+    .zonet { font-size: 12px; fill: #6b7280; font-weight: 600; }
+    .box { fill: #ffffff; stroke: #9ca3af; }
+    .core { fill: #eff6ff; stroke: #2563eb; }
+    .name { font-size: 14px; fill: #1f2937; font-weight: 600; }
+    .sub { font-size: 12px; fill: #6b7280; }
+    .port { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 11px; fill: #2563eb; }
+    .arrow { stroke: #6b7280; stroke-width: 1.5; fill: none; marker-end: url(#a); }
+    .ext { stroke: #9ca3af; stroke-width: 1.5; fill: none; stroke-dasharray: 4 3; marker-end: url(#a); }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#6b7280"/>
+    </marker>
+  </defs>
+  <rect x="0.5" y="0.5" width="759" height="399" rx="12" fill="#f8f9fb" stroke="#e5e7eb"/>
+  <text x="24" y="32" class="title">Cómo encajan las piezas en el servidor</text>
+  <text x="736" y="32" class="note" text-anchor="end">Puertos por defecto; los reales: Services › estado</text>
+
+  <!-- browser -->
+  <rect x="24" y="168" width="120" height="64" rx="10" class="box"/>
+  <text x="84" y="196" class="name" text-anchor="middle">Navegador</text>
+  <text x="84" y="216" class="sub" text-anchor="middle">usuarios en la LAN</text>
+
+  <!-- server zone -->
+  <rect x="170" y="52" width="566" height="320" rx="14" class="zone"/>
+  <text x="186" y="72" class="zonet">Servidor · todo lo de dentro escucha en 127.0.0.1 salvo Open WebUI</text>
+
+  <rect x="196" y="164" width="150" height="72" rx="10" class="core"/>
+  <text x="271" y="192" class="name" text-anchor="middle">Open WebUI</text>
+  <text x="271" y="212" class="port" text-anchor="middle">:3000 (LAN)</text>
+  <path d="M144 200 H192" class="arrow"/>
+
+  <rect x="196" y="282" width="150" height="64" rx="10" class="box"/>
+  <text x="271" y="308" class="name" text-anchor="middle">Ollama + GPU</text>
+  <text x="271" y="328" class="port" text-anchor="middle">:11434 · modelos</text>
+  <path d="M271 236 V278" class="arrow"/>
+
+  <rect x="410" y="88" width="190" height="50" rx="10" class="box"/>
+  <text x="426" y="110" class="name">SearXNG</text>
+  <text x="590" y="110" class="port" text-anchor="end">:8888</text>
+  <text x="426" y="128" class="sub">búsqueda web</text>
+
+  <rect x="410" y="150" width="190" height="50" rx="10" class="box"/>
+  <text x="426" y="172" class="name">Apache Tika</text>
+  <text x="590" y="172" class="port" text-anchor="end">:9998</text>
+  <text x="426" y="190" class="sub">texto de documentos</text>
+
+  <rect x="410" y="212" width="190" height="50" rx="10" class="box"/>
+  <text x="426" y="234" class="name">mcpo</text>
+  <text x="590" y="234" class="port" text-anchor="end">:8001</text>
+  <text x="426" y="252" class="sub">time · fetch</text>
+
+  <rect x="410" y="274" width="190" height="50" rx="10" class="box"/>
+  <text x="426" y="296" class="name">Open Terminal</text>
+  <text x="590" y="296" class="port" text-anchor="end">:8000</text>
+  <text x="426" y="314" class="sub">comandos · archivos</text>
+
+  <path d="M346 186 C376 186 380 113 406 113" class="arrow"/>
+  <path d="M346 196 C376 196 380 175 406 175" class="arrow"/>
+  <path d="M346 206 C376 206 380 237 406 237" class="arrow"/>
+  <path d="M346 216 C376 216 380 299 406 299" class="arrow"/>
+
+  <rect x="626" y="124" width="100" height="64" rx="10" class="box"/>
+  <text x="676" y="152" class="name" text-anchor="middle">Internet</text>
+  <text x="676" y="172" class="sub" text-anchor="middle">buscadores</text>
+  <path d="M600 113 C614 113 612 140 622 140" class="ext"/>
+  <path d="M600 237 C616 237 612 176 622 176" class="ext"/>
+
+  <text x="196" y="364" class="note">Open WebUI llama a las herramientas desde el servidor: no hay que abrirlas en el firewall.</text>
+</svg>

@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="360" viewBox="0 0 760 360" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif">
+  <title>Esquema de cómo dar acceso a un grupo a una conexión de Open Terminal o de herramientas</title>
+  <style>
+    .title { font-size: 14px; font-weight: 600; fill: #1f2937; }
+    .note { font-size: 12px; fill: #6b7280; }
+    .crumb { font-size: 13px; fill: #374151; }
+    .crumbb { font-size: 13px; fill: #1f2937; font-weight: 600; }
+    .card { fill: #ffffff; stroke: #d0d5dd; }
+    .item { font-size: 14px; fill: #1f2937; }
+    .url { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; fill: #6b7280; }
+    .btn { fill: #f3f4f6; stroke: #d0d5dd; }
+    .btnt { font-size: 12px; fill: #374151; }
+    .modal { fill: #ffffff; stroke: #9ca3af; }
+    .sec { font-size: 12px; fill: #6b7280; font-weight: 600; }
+    .opt { fill: #ffffff; stroke: #d0d5dd; }
+    .sel { fill: #eff6ff; stroke: #2563eb; }
+    .tag { fill: #dbeafe; }
+    .tagt { font-size: 12px; fill: #1e40af; }
+    .save { fill: #111827; }
+    .savet { font-size: 12px; fill: #ffffff; font-weight: 600; }
+    .num { fill: #2563eb; }
+    .numt { font-size: 12px; fill: #ffffff; font-weight: 700; }
+    .lead { stroke: #2563eb; stroke-width: 1.5; fill: none; }
+  </style>
+  <rect x="0.5" y="0.5" width="759" height="359" rx="12" fill="#f8f9fb" stroke="#e5e7eb"/>
+  <text x="24" y="32" class="title">Administración: dar acceso a un grupo</text>
+  <text x="736" y="32" class="note" text-anchor="end">Esquema · textos de Open WebUI 0.11.3</text>
+
+  <circle cx="34" cy="58" r="10" class="num"/><text x="34" y="62" class="numt" text-anchor="middle">1</text>
+  <text x="52" y="63" class="crumb">Administración  ›  Ajustes  ›  </text>
+  <text x="232" y="63" class="crumbb">Integraciones</text>
+
+  <rect x="24" y="80" width="330" height="70" rx="10" class="card"/>
+  <text x="40" y="106" class="item">Open Terminal (this server)</text>
+  <text x="40" y="128" class="url">http://127.0.0.1:9000</text>
+  <rect x="284" y="98" width="56" height="28" rx="8" class="btn"/>
+  <text x="312" y="117" class="btnt" text-anchor="middle">Editar</text>
+  <circle cx="312" cy="164" r="10" class="num"/><text x="312" y="168" class="numt" text-anchor="middle">2</text>
+  <path d="M312 154 V128" class="lead"/>
+
+  <rect x="24" y="186" width="330" height="70" rx="10" class="card"/>
+  <text x="40" y="212" class="item">time (mcpo) · fetch (mcpo)</text>
+  <text x="40" y="234" class="url">Servidores de Herraientas</text>
+
+  <!-- modal -->
+  <rect x="384" y="60" width="352" height="270" rx="14" class="modal"/>
+  <text x="404" y="90" class="item" font-weight="600">Editar Conexión del Terminal</text>
+  <text x="404" y="122" class="sec">Control de Permisos</text>
+  <rect x="404" y="134" width="312" height="34" rx="8" class="opt"/>
+  <text x="420" y="156" class="item">Privado (solo administradores)</text>
+  <rect x="404" y="176" width="312" height="34" rx="8" class="sel"/>
+  <text x="420" y="198" class="item">Grupos</text>
+  <rect x="404" y="222" width="104" height="26" rx="13" class="tag"/>
+  <text x="456" y="240" class="tagt" text-anchor="middle">Equipo IA  ✕</text>
+  <rect x="516" y="222" width="64" height="26" rx="13" class="btn"/>
+  <text x="548" y="240" class="btnt" text-anchor="middle">Añadir</text>
+  <rect x="644" y="286" width="72" height="30" rx="8" class="save"/>
+  <text x="680" y="306" class="savet" text-anchor="middle">Guardar</text>
+  <circle cx="374" cy="198" r="10" class="num"/><text x="374" y="202" class="numt" text-anchor="middle">3</text>
+
+  <text x="24" y="290" class="note">Las conexiones creadas por el instalador empiezan como privadas.</text>
+  <text x="24" y="308" class="note">Da acceso solo a quien lo necesite, sobre todo al terminal.</text>
+  <text x="24" y="326" class="note">Lo mismo para cada servidor de herramientas.</text>
+</svg>
