@@ -26,6 +26,8 @@
   <rect x="24" y="168" width="120" height="64" rx="10" class="box"/>
   <text x="84" y="196" class="name" text-anchor="middle">Navegador</text>
   <text x="84" y="216" class="sub" text-anchor="middle">usuarios en la LAN</text>
+  <text x="84" y="252" class="port" text-anchor="middle">https :443 (Caddy)</text>
+  <text x="84" y="268" class="sub" text-anchor="middle">o http :3000</text>
 
   <!-- server zone -->
   <rect x="170" y="52" width="566" height="320" rx="14" class="zone"/>
@@ -49,7 +51,7 @@
   <rect x="410" y="150" width="190" height="50" rx="10" class="box"/>
   <text x="426" y="172" class="name">Apache Tika</text>
   <text x="590" y="172" class="port" text-anchor="end">:9998</text>
-  <text x="426" y="190" class="sub">texto de documentos</text>
+  <text x="426" y="190" class="sub">texto y OCR</text>
 
   <rect x="410" y="212" width="190" height="50" rx="10" class="box"/>
   <text x="426" y="234" class="name">mcpo</text>

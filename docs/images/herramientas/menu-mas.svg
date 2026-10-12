@@ -42,5 +42,5 @@
   <text x="320" y="256" class="leg">Usa una colección guardada en Espacio de Trabajo › Conocimiento.</text>
   <text x="320" y="274" class="leg">Atajo: escribe # en el mensaje y elige la colección.</text>
 
-  <text x="320" y="320" class="note">PDF escaneados: sin texto extraíble (no hay OCR en el servidor).</text>
+  <text x="320" y="320" class="note">PDF escaneados e imágenes: se leen con OCR (español e inglés).</text>
 </svg>

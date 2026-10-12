@@ -18,6 +18,11 @@ xemi_ai_install.sh is the starter and command entry point. Its implementation is
 - extras.sh: optional Open WebUI tools (Open Terminal, mcpo, SearXNG, Apache Tika).
 - services.sh: status table and control (start/stop/restart, boot, logs, analysis) for managed systemd services.
 - owui_api.sh: Open WebUI admin API client that connects and disconnects the tools.
+- https.sh: HTTPS front end for Open WebUI (Caddy with a local certificate authority).
+- backup.sh: scheduled Open WebUI backups and restore.
+- voice.sh: Piper text to speech and Open WebUI dictation (Whisper) settings; piper_openai_server.py is the small OpenAI-compatible speech server it installs.
+- jupyter.sh: Jupyter as the Open WebUI code interpreter.
+- browser.sh: headless Chromium (Playwright) for Open WebUI's web loader.
 - network.sh: LAN firewall and service binding operations.
 - lifecycle.sh: uninstall and purge cleanup.
 - diagnostics.sh: reports and readiness checks.
@@ -200,9 +205,9 @@ The main menu groups operations into submenus. Each line lists what the submenu 
  1) Guided installation  full setup / repair, NVIDIA drivers, AI stack
  2) Ollama               install, LAN service, status, health check, remove
  3) Models               storage directory, install, list, test, remove
- 4) Open WebUI           Python 3.11, install, updates, rollback, health check
- 5) Open WebUI tools     Open Terminal, MCP tools, web search, document extraction
- 6) Network              LAN firewall, ports and service bindings
+ 4) Open WebUI           install, updates, rollback, recommended settings, backups
+ 5) Open WebUI tools     Open Terminal, MCP tools, web search, document extraction + OCR
+ 6) Network              LAN firewall, HTTPS access, ports and service bindings
  7) Services             status and ports, start/stop/restart, logs, GPU, diagnostics
  8) Diagnostics          GPU info, doctor check, installation report
  9) Uninstall            remove stack (keep Ollama data), purge to zero
@@ -693,9 +698,10 @@ A new installation starts with these defaults, written to `/etc/xemi-ai/openwebu
 |---|---|---|
 | `TASK_MODEL` | `qwen2.5:0.5b` | Titles, tags and search queries run on a small model instead of queueing on the chat model. If it is not pulled, Open WebUI uses the chat model. |
 | `RAG_EMBEDDING_MODEL` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | Multilingual document search (Spanish included), on the CPU so it does not compete for VRAM. |
-| `RAG_TOP_K` / `WEB_SEARCH_RESULT_COUNT` | `5` / `5` | More context per answer, sized for the 16k Ollama context. |
+| `ENABLE_RAG_HYBRID_SEARCH` / `RAG_RERANKING_MODEL` | `true` / `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` | Document search by meaning and keywords, re-ranked by a multilingual model on the CPU (about 0.5 s per query on an i7-3770). |
+| `RAG_TOP_K` / `RAG_TOP_K_RERANKER` / `WEB_SEARCH_RESULT_COUNT` | `10` / `5` / `5` | 10 candidates are re-ranked and the best 5 reach the model; sized for the 16k Ollama context. |
 
-Open WebUI reads these only on its first start and then keeps its own settings in its database, so existing installations are not changed. For an existing installation use `4) Open WebUI > Apply recommended settings` (all but the embedding model, which needs re-indexing of your documents).
+Open WebUI reads these only on its first start and then keeps its own settings in its database, so existing installations are not changed. On that first start it also downloads the embedding and re-ranking models, so it can take a few minutes longer to answer. For an existing installation use `4) Open WebUI > Apply recommended settings` (all but the embedding model, which needs re-indexing of your documents).
 
 Persistent data is stored in:
 
@@ -739,10 +745,16 @@ How to use the tools in Open WebUI, with diagrams, for users and administrators 
 | Open Terminal | `open-terminal` | 8000 | Shell, file browser and code execution for models | `aiterminal` |
 | mcpo | `mcpo` | 8001 | MCP servers `time` and `fetch` as OpenAPI tool servers | `aitools` |
 | SearXNG | `searxng` | 8888 | Private web search without paid APIs | `aitools` |
-| Apache Tika | `tika` | 9998 | PDF/Word/Excel text extraction for documents and RAG | `aitools` |
+| Apache Tika | `tika` | 9998 | PDF/Word/Excel text extraction for documents and RAG, with OCR (Tesseract, Spanish + English) for scanned PDFs and images | `aitools` |
+| Piper TTS | `piper-tts` | 8002 | Spoken answers with natural voices on the CPU (`es_ES-davefx`, `es_ES-sharvard`, `en_US-lessac`) | `aitools` |
+| Jupyter | `jupyter` | 8890 | Code interpreter on the server: Python with numpy, pandas, matplotlib, charts in the chat | `aijupyter` |
+| Chromium loader | `chromium` | 8003 | Headless Chromium (Playwright) so web search and URLs read pages built with JavaScript | `aibrowser` |
+
+`Add or remove MCP servers in mcpo` (or `mcp-servers`) adds catalog MCP servers to mcpo, each in its own venv under `/opt/mcpo-servers` so they cannot break mcpo's dependencies: `wikipedia` (`wikipedia-mcp`, Spanish edition) and `arxiv` (`arxiv-mcp-server`, papers stored in `/var/lib/ai-tools/arxiv-papers`). After a change mcpo restarts and the installer offers to refresh the Open WebUI tool servers.
 
 ```bash
 sudo /usr/local/bin/xemi_ai_install.sh searxng
+sudo /usr/local/bin/xemi_ai_install.sh mcp-servers
 sudo /usr/local/bin/xemi_ai_install.sh tools-status
 sudo /usr/local/bin/xemi_ai_install.sh tools-update
 ```
@@ -757,7 +769,9 @@ Open WebUI keeps these settings in its database, where environment variables no 
 - Before writing, it checks that each API response has the expected shape. If Open WebUI changed its API, nothing is written and the manual values below are shown.
 - Unattended runs (`--yes`) skip this step.
 
-`4) Open WebUI > Apply recommended settings` sets the task model to `qwen2.5:0.5b`, and documents Top K and web search results to 5, through the same API. It does not change the embedding model, because that requires re-indexing your documents.
+`4) Open WebUI > Apply recommended settings` sets, through the same API, the task model to `qwen2.5:0.5b`, hybrid document search with the multilingual re-ranker (10 candidates, best 5 to the model; Open WebUI downloads the re-ranker, about 470 MB, while applying and the installer checks that it loaded) and 5 web search results. It does not change the embedding model, because that requires re-indexing your documents.
+
+Existing Tika installs get OCR with `5) Open WebUI tools > Update installed tools` (it installs `tesseract` and `tesseract-langpack-spa` from AppStream, writes `/opt/tika/tika-config.xml` and restarts Tika). Tika 3 runs OCR on PDF pages without a text layer, so normal PDFs are not slowed down.
 
 Manual values, also printed by `tools-status`:
 
@@ -772,6 +786,7 @@ Security notes:
 
 - Open Terminal lets connected models run commands as `aiterminal`. That user has no sudo, sees the system read-only, can write only to `/var/lib/open-terminal`, cannot see `/home` or other users' processes. It can still read world-readable files and reach the network.
 - mcpo accepts its API key only as a command-line argument. The tool services run with `ProtectProc=invisible`, so the Open Terminal user cannot see other users' processes or that key; other local login users can still see it in the process list.
+- SearXNG uses Bing and Yahoo besides its defaults: from a single server IP, DuckDuckGo, Brave and Google soon answer with CAPTCHAs or rate limits and return nothing. The installer writes `/etc/searxng/settings.yml` (keeping its secret key) on install and on `tools-update`.
 - SearXNG follows the upstream main branch; the installed commit is recorded in the manifest, and `tools-update` returns to the previous commit if the new one fails to install or start. Apache Tika is pinned to a release verified by SHA512 and uses Java 21 from the distribution.
 
 ### Removing tools without leaving traces
@@ -780,7 +795,7 @@ Security notes:
 
 - The service, its unit, venv or jar, configuration directory and API key file.
 - The `aiterminal`/`aitools` users, their groups and home directories, once no installed tool needs them (only users this installer created).
-- System packages the tool installed (Java 21 for Tika, git for SearXNG if it was missing). The installer records exactly which RPMs each install added and removes them only if `rpm -e --test` confirms nothing else needs them now; otherwise it keeps them and says so.
+- System packages the tool installed (Java 21 and Tesseract for Tika, git for SearXNG if it was missing). The installer records exactly which RPMs each install added and removes them only if `rpm -e --test` confirms nothing else needs them now; otherwise it keeps them and says so.
 - Its manifest entries. Python packages are installed with `--no-cache-dir`, so nothing is added to root's pip cache.
 
 The one exception is user work: if the Open Terminal workspace (`/var/lib/open-terminal`) contains files beyond the shell skeleton, history and Open Terminal logs, the installer asks before deleting it (default: keep) and keeps `aiterminal` as their owner. `purge` deletes it without asking.
@@ -876,6 +891,49 @@ Menu group `7) Services` shows and controls every systemd unit the installer cre
 
 The status table also lists the TCP addresses each service listens on (`LISTEN`), read from the processes in the service's cgroup, so it shows the real port even if it was changed during installation.
 
+## Voice
+
+- **Dictation and voice mode** use Open WebUI's built-in Whisper (faster-whisper, CPU). `4) Open WebUI > Voice settings` sets the model to `small` (accurate in Spanish and faster than real time on an i7-3770; `base`, the Open WebUI default, mishears Spanish) and the language (`es` by default, `auto` to detect). The language is read when Open WebUI starts, so changing it rewrites `/etc/xemi-ai/openwebui.env` and restarts Open WebUI after asking: the restart cuts off answers being generated at that moment. `voice-setup` opens the same screen. Browsers only allow the microphone on HTTPS pages: enable HTTPS access first.
+- **Spoken answers** use Piper (`5) Open WebUI tools > Install Piper text to speech`). Piper has no OpenAI-compatible API, so the installer adds `piper_openai_server.py`: `POST /v1/audio/speech` returns MP3 (encoded with `lameenc`, no ffmpeg needed), `GET /v1/audio/voices` lists the installed voices, and unknown voice names fall back to `es_ES-davefx-medium`. Open WebUI's "OpenAI" text-to-speech engine points to it.
+
+## Jupyter Code Interpreter
+
+`5) Open WebUI tools > Install Jupyter code interpreter` runs model-written Python on the server instead of in each browser (Pyodide), with numpy, pandas, matplotlib and openpyxl; charts come back into the chat as images.
+
+- Jupyter runs as `aijupyter` with the same sandbox as Open Terminal, listens on `127.0.0.1`, uses a token from `/etc/xemi-ai/jupyter.env` (passed as `JUPYTER_TOKEN`, not on the command line), has its web terminal disabled and shuts idle kernels down after 15 minutes. Its workspace `/var/lib/jupyter` is shared by everyone allowed to use the code interpreter.
+- Open WebUI lets every user use the code interpreter by default. When connecting Jupyter the installer asks whether to keep that; the default answer limits it to admins (grant groups in Admin settings > Users > Groups > Permissions). Removing Jupyter restores the previous default and sets Open WebUI back to Pyodide.
+
+## Chromium Web Loader
+
+`5) Open WebUI tools > Install Chromium web loader` makes Open WebUI read web pages (search results, URLs in chats) with headless Chromium, so pages that build their content with JavaScript are no longer empty.
+
+- A Playwright server runs Chromium as `aibrowser` in the usual sandbox, on `127.0.0.1:8003`. It needs a few X11 and accessibility libraries and fonts (`fontconfig`, DejaVu, Liberation) from AppStream, installed and removed like the other tools' packages; without a fontconfig setup Chromium aborts on the first page that uses web fonts. Chromium itself is Playwright's build (about 270 MB).
+- Open WebUI connects with the Playwright client inside its own venv. Client and server use the Playwright version Open WebUI declares (`playwright==1.60.0` for Open WebUI 0.11.3); after an Open WebUI update or rollback the installer installs the matching client in the new environment and moves the server to the same version.
+- Open WebUI's loader parses the rendered pages with `unstructured`, which Open WebUI does not install. The installer adds `unstructured` at the version Open WebUI pins, with Open WebUI's own pins as pip constraints so no package Open WebUI depends on changes version, runs `pip check`, and records the packages it added (`/var/lib/xemi-ai/packages/openwebui-playwright-client.list`). Removing the loader uninstalls only those that nothing else needs.
+- The install loads a JavaScript test page through Chromium and parses it with `unstructured`, from Open WebUI's own Python, before declaring success. `chromium` installs it from the command line.
+
+## HTTPS Access
+
+`6) Network > Enable HTTPS access for Open WebUI` (or `https-setup`) puts Caddy in front of Open WebUI with a certificate authority that belongs to this server. HTTPS encrypts chats and passwords on the LAN, and browsers only allow the microphone (dictation, voice mode) on HTTPS pages.
+
+- The installer downloads the official Caddy `2.10.0` binary into `/opt/xemi-https` and verifies its SHA512. It does not use the EPEL package, whose install scripts turn on the global SELinux boolean `httpd_can_network_connect`.
+- Caddy runs as the `aiproxy` user with only `CAP_NET_BIND_SERVICE`, plus the same sandbox as the tools (exposure 2.0 OK). Data and the CA live in `/var/lib/xemi-https`.
+- It asks for the names and IPv4 addresses users type (default: host name, FQDN and the server's IPv4 addresses) and the port (443), and allows that port from the LAN subnet only.
+- Users install the root certificate once: download it from `https://<server>/xemi-ca.crt`, compare the SHA-256 fingerprint shown by `https-info`, and trust it as a certificate authority. `https-info` prints the steps for Windows, macOS, Linux, Android, iOS and Firefox.
+- `http://<server>:3000` keeps working.
+- `Remove HTTPS access`, `uninstall` and `purge` remove the service, binary, configuration, CA, firewall rule and service user.
+- `tools-update` rewrites the Caddyfile from the manifest and restarts Caddy, so existing installs get fixes. The site list always includes `127.0.0.1`, which the local health checks (`doctor`, the services panel) use to reach Open WebUI through the proxy. The installer checks the Caddyfile with `caddy adapt`; `caddy validate` would create a stray certificate authority in root's home directory.
+
+## Open WebUI Backups
+
+`4) Open WebUI > Backups` (or `backup-setup`) schedules a daily backup (systemd timer `xemi-openwebui-backup.timer`):
+
+- Contents: `webui.db` (chats, users, settings, knowledge), uploads, the vector index and the secret key. The SQLite databases are copied with SQLite's online backup API, so the copy is consistent while Open WebUI keeps running. The model cache is not included.
+- Directory, time and retention are configurable (default `/var/backups/open-webui`, 03:30, keep 7). The installer warns when the directory is on the same disk as Open WebUI.
+- Archives are `openwebui-<date>.tar.gz`, root-only (they contain every user's chats). `backup-now` runs one on demand.
+- Restore lists the archives, refuses one from a newer Open WebUI than the installed one, takes an `openwebui-pre-restore-<date>.tar.gz` backup first, and puts the previous data back automatically if Open WebUI does not start with the restored data.
+- Stopping the backups, `uninstall` and `purge` never delete the archives.
+
 ## Diagnostics
 
 Run:
@@ -899,7 +957,9 @@ The doctor check verifies:
 - firewalld rules recorded by the installer still exist.
 - Ollama runs with the context length and K/V cache recorded in the manifest (warning: run `ollama-tune`).
 - Ollama bind address (warning when it listens on all interfaces).
-- Each installed Open WebUI tool is running, responds, and has its hardening drop-in (warning: run `tools-update`).
+- Each installed Open WebUI tool is running, responds, and has its hardening drop-in (warning: run `tools-update`); Tika has OCR.
+- HTTPS front end running, answering and allowed in the firewall, when enabled.
+- Open WebUI backups scheduled and the latest one less than 48 hours old (warning otherwise).
 
 Warnings do not make the doctor fail; they point to settings worth reviewing.
 

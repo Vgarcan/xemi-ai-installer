@@ -26,7 +26,8 @@ owui_api() {
     curl -fsS --max-time 30 -H @<(printf 'Authorization: Bearer %s\n' "$OWUI_TOKEN") \
       "$(owui_base_url)${path}"
   else
-    curl -fsS --max-time 120 -X "$method" -H @<(printf 'Authorization: Bearer %s\n' "$OWUI_TOKEN") \
+    # OWUI_API_MAX_TIME lets slow calls (a model download inside the request) wait longer.
+    curl -fsS --max-time "${OWUI_API_MAX_TIME:-120}" -X "$method" -H @<(printf 'Authorization: Bearer %s\n' "$OWUI_TOKEN") \
       -H 'Content-Type: application/json' --data-binary @- "$(owui_base_url)${path}"
   fi
 }
@@ -236,6 +237,150 @@ owui_disconnect_tika() {
   ok "Open WebUI content extraction set back to the default engine (Tika removed)."
 }
 
+# Audio settings are one form (tts + stt) that Open WebUI replaces as a whole.
+OWUI_AUDIO_SHAPE='(.tts | type == "object" and has("ENGINE") and has("OPENAI_API_BASE_URL") and has("VOICE")) and (.stt | type == "object" and has("ENGINE") and has("WHISPER_MODEL"))'
+
+owui_audio_update() {
+  local filter="$1"
+  local current body
+  current="$(owui_get_checked "/api/v1/audio/config" "$OWUI_AUDIO_SHAPE")" \
+    || { owui_api_changed "/api/v1/audio/config"; return 1; }
+  body="$(jq "{tts: .tts, stt: .stt} | ${filter}" <<< "$current")" || return 1
+  # Changing the Whisper model makes Open WebUI download it inside the request.
+  OWUI_API_MAX_TIME=900 owui_api POST "/api/v1/audio/config/update" <<< "$body" >/dev/null
+}
+
+owui_set_whisper() {
+  echo "Setting dictation to local Whisper (${OPENWEBUI_WHISPER_MODEL}); Open WebUI downloads it now..."
+  if owui_audio_update ".stt.ENGINE = \"\" | .stt.WHISPER_MODEL = \"${OPENWEBUI_WHISPER_MODEL}\""; then
+    ok "Dictation uses local Whisper ${OPENWEBUI_WHISPER_MODEL}."
+  else
+    fail "Open WebUI rejected the speech-to-text settings."
+    return 1
+  fi
+}
+
+owui_connect_piper_tts() {
+  local url="http://127.0.0.1:${PIPER_PORT:-$PIPER_PORT_DEFAULT}/v1"
+  if owui_audio_update ".tts.ENGINE = \"openai\" | .tts.OPENAI_API_BASE_URL = \"${url}\" | .tts.OPENAI_API_KEY = \"piper\" | .tts.MODEL = \"piper\" | .tts.VOICE = \"${PIPER_DEFAULT_VOICE}\""; then
+    ok "Spoken answers use Piper (${PIPER_DEFAULT_VOICE})."
+  else
+    fail "Open WebUI rejected the text-to-speech settings."
+    show_piper_connection
+    return 1
+  fi
+}
+
+owui_disconnect_piper_tts() {
+  local current
+  current="$(owui_get_checked "/api/v1/audio/config" "$OWUI_AUDIO_SHAPE")" \
+    || { owui_api_changed "/api/v1/audio/config"; return 1; }
+  # Only undo settings that still point to this installer's Piper.
+  if ! jq -e '.tts.ENGINE == "openai" and (.tts.OPENAI_API_BASE_URL // "" | startswith("http://127.0.0.1:"))' <<< "$current" >/dev/null; then
+    OWUI_DISCONNECTED+="piper-tts "
+    return 0
+  fi
+  owui_audio_update '.tts.ENGINE = "" | .tts.OPENAI_API_BASE_URL = "https://api.openai.com/v1" | .tts.OPENAI_API_KEY = "" | .tts.MODEL = "tts-1" | .tts.VOICE = "alloy"' \
+    || { fail "Could not reset text to speech in Open WebUI."; return 1; }
+  OWUI_DISCONNECTED+="piper-tts "
+  ok "Open WebUI text to speech set back to the browser voices (Piper removed)."
+}
+
+OWUI_LOADER_SHAPE='.web | type == "object" and has("WEB_LOADER_ENGINE") and has("PLAYWRIGHT_WS_URL")'
+
+owui_connect_playwright() {
+  local path="/api/v1/retrieval/config"
+  local current body
+  current="$(owui_get_checked "$path" "$OWUI_LOADER_SHAPE")" || { owui_api_changed "$path"; show_playwright_connection; return 1; }
+  body="$(jq --arg url "ws://127.0.0.1:${PLAYWRIGHT_PORT:-$PLAYWRIGHT_PORT_DEFAULT}/" \
+    '{web: (.web + {WEB_LOADER_ENGINE: "playwright", PLAYWRIGHT_WS_URL: $url, PLAYWRIGHT_TIMEOUT: 15000})}' <<< "$current")" || return 1
+  if ! owui_api POST "/api/v1/retrieval/config/update" <<< "$body" >/dev/null; then
+    fail "Open WebUI rejected the web loader settings."
+    show_playwright_connection
+    return 1
+  fi
+  ok "Open WebUI now reads web pages with Chromium (JavaScript pages included)."
+}
+
+owui_disconnect_playwright() {
+  local path="/api/v1/retrieval/config"
+  local current body
+  current="$(owui_get_checked "$path" "$OWUI_LOADER_SHAPE")" || { owui_api_changed "$path"; return 1; }
+  if jq -e '.web.WEB_LOADER_ENGINE == "playwright" and (.web.PLAYWRIGHT_WS_URL // "" | startswith("ws://127.0.0.1:"))' <<< "$current" >/dev/null; then
+    body="$(jq '{web: (.web + {WEB_LOADER_ENGINE: "", PLAYWRIGHT_WS_URL: ""})}' <<< "$current")" || return 1
+    owui_api POST "/api/v1/retrieval/config/update" <<< "$body" >/dev/null || { fail "Could not reset the web loader in Open WebUI."; return 1; }
+    ok "Open WebUI web loader set back to the default (Chromium removed)."
+  fi
+  OWUI_DISCONNECTED+="playwright "
+}
+
+OWUI_CODE_SHAPE='has("ENABLE_CODE_EXECUTION") and has("CODE_EXECUTION_ENGINE") and has("CODE_EXECUTION_JUPYTER_URL") and has("ENABLE_CODE_INTERPRETER") and has("CODE_INTERPRETER_ENGINE") and has("CODE_INTERPRETER_JUPYTER_URL")'
+OWUI_PERMISSIONS_SHAPE='(.features | type == "object" and has("code_interpreter")) and has("workspace") and has("chat")'
+
+# Sets the default "code interpreter" permission for all users (true/false).
+owui_set_code_interpreter_permission() {
+  local value="$1"
+  local current body
+  current="$(owui_get_checked "/api/v1/users/default/permissions" "$OWUI_PERMISSIONS_SHAPE")" \
+    || { owui_api_changed "/api/v1/users/default/permissions"; return 1; }
+  body="$(jq --argjson v "$value" '.features.code_interpreter = $v' <<< "$current")" || return 1
+  owui_api POST "/api/v1/users/default/permissions" <<< "$body" >/dev/null
+}
+
+owui_connect_jupyter() {
+  local path="/api/v1/configs/code_execution"
+  local current body token url ans allowed
+  current="$(owui_get_checked "$path" "$OWUI_CODE_SHAPE")" || { owui_api_changed "$path"; show_jupyter_connection; return 1; }
+  token="$(sed -n 's/^JUPYTER_TOKEN=//p' "$JUPYTER_ENV_FILE")"
+  url="http://127.0.0.1:${JUPYTER_PORT:-$JUPYTER_PORT_DEFAULT}"
+  body="$(XEMI_TOKEN="$token" jq --arg url "$url" '. + {
+      ENABLE_CODE_EXECUTION: true, CODE_EXECUTION_ENGINE: "jupyter", CODE_EXECUTION_JUPYTER_URL: $url,
+      CODE_EXECUTION_JUPYTER_AUTH: "token", CODE_EXECUTION_JUPYTER_AUTH_TOKEN: env.XEMI_TOKEN, CODE_EXECUTION_JUPYTER_TIMEOUT: 60,
+      ENABLE_CODE_INTERPRETER: true, CODE_INTERPRETER_ENGINE: "jupyter", CODE_INTERPRETER_JUPYTER_URL: $url,
+      CODE_INTERPRETER_JUPYTER_AUTH: "token", CODE_INTERPRETER_JUPYTER_AUTH_TOKEN: env.XEMI_TOKEN, CODE_INTERPRETER_JUPYTER_TIMEOUT: 60
+    }' <<< "$current")" || return 1
+  if ! owui_api POST "$path" <<< "$body" >/dev/null; then
+    fail "Open WebUI rejected the code execution settings."
+    show_jupyter_connection
+    return 1
+  fi
+  ok "Code execution and the code interpreter now run in Jupyter on this server."
+
+  # Running code on the server is a bigger step than Pyodide in the browser: ask who may do it.
+  allowed="$(owui_get_checked "/api/v1/users/default/permissions" "$OWUI_PERMISSIONS_SHAPE" | jq -r '.features.code_interpreter' 2>/dev/null || true)"
+  if [ "$allowed" = "true" ]; then
+    ans="$(ask "Let EVERY user run code on the server (no = admins and groups you allow) yes or no" "no")"
+    if ! is_yes "$ans"; then
+      if owui_set_code_interpreter_permission false; then
+        record_manifest "JUPYTER_PERMISSION_CHANGED" "1"
+        ok "Code interpreter limited to admins; allow groups in Admin settings > Users > Groups > Permissions."
+      else
+        warn "Could not change the default permission; check Admin settings > Users > Default permissions."
+      fi
+    fi
+  fi
+}
+
+owui_disconnect_jupyter() {
+  local path="/api/v1/configs/code_execution"
+  local current body
+  current="$(owui_get_checked "$path" "$OWUI_CODE_SHAPE")" || { owui_api_changed "$path"; return 1; }
+  if jq -e '(.CODE_EXECUTION_JUPYTER_URL // "" | startswith("http://127.0.0.1:")) or (.CODE_INTERPRETER_JUPYTER_URL // "" | startswith("http://127.0.0.1:"))' <<< "$current" >/dev/null; then
+    body="$(jq '. + {CODE_EXECUTION_ENGINE: "pyodide", CODE_EXECUTION_JUPYTER_URL: "", CODE_EXECUTION_JUPYTER_AUTH: "", CODE_EXECUTION_JUPYTER_AUTH_TOKEN: "",
+      CODE_INTERPRETER_ENGINE: "pyodide", CODE_INTERPRETER_JUPYTER_URL: "", CODE_INTERPRETER_JUPYTER_AUTH: "", CODE_INTERPRETER_JUPYTER_AUTH_TOKEN: ""}' <<< "$current")" || return 1
+    owui_api POST "$path" <<< "$body" >/dev/null || { fail "Could not reset code execution in Open WebUI."; return 1; }
+    ok "Open WebUI code execution set back to Pyodide in the browser (Jupyter removed)."
+  fi
+  if [ "${JUPYTER_PERMISSION_CHANGED:-}" = "1" ]; then
+    if owui_set_code_interpreter_permission true; then
+      remove_manifest_key JUPYTER_PERMISSION_CHANGED
+      JUPYTER_PERMISSION_CHANGED=""
+      ok "Default code interpreter permission restored for all users."
+    fi
+  fi
+  OWUI_DISCONNECTED+="jupyter "
+}
+
 # ---------------------------------------------------------------------------
 # Entry points used by the installers, removal and the menu
 # ---------------------------------------------------------------------------
@@ -325,7 +470,10 @@ apply_openwebui_recommended_settings() {
   echo "Recommended Open WebUI settings:"
   echo "  - Task model (titles, tags, search queries): ${task_model}, so these jobs do not"
   echo "    queue in front of your answer on the main model (about 0.5-0.9 GiB of VRAM)."
-  echo "  - Documents Top K: ${OPENWEBUI_RAG_TOP_K} and web search results: ${OPENWEBUI_WEB_SEARCH_RESULT_COUNT} (fits the ${OLLAMA_CONTEXT_LENGTH}-token context)."
+  echo "  - Document search: hybrid (meaning + keywords), ${OPENWEBUI_RAG_TOP_K} candidates re-ranked by the"
+  echo "    multilingual ${OPENWEBUI_RERANKING_MODEL} (CPU), best ${OPENWEBUI_RAG_TOP_K_RERANKER} go to the model."
+  echo "    Open WebUI downloads it (about 470 MB) while applying; this can take a few minutes."
+  echo "  - Web search results: ${OPENWEBUI_WEB_SEARCH_RESULT_COUNT} (fits the ${OLLAMA_CONTEXT_LENGTH}-token context)."
   echo "  - Embedding model is not changed here: it needs re-indexing; see the README."
   echo ""
   ans="$(ask "Turn off follow-up suggestions after each answer yes or no" "no")"
@@ -351,13 +499,22 @@ apply_openwebui_recommended_settings() {
     owui_api_changed "/api/v1/tasks/config"
   fi
 
-  if retrieval="$(owui_get_checked "/api/v1/retrieval/config" 'has("TOP_K") and (.web | type == "object" and has("WEB_SEARCH_RESULT_COUNT"))')"; then
-    body="$(jq --argjson k "$OPENWEBUI_RAG_TOP_K" --argjson n "$OPENWEBUI_WEB_SEARCH_RESULT_COUNT" \
-      '{TOP_K: $k, web: (.web + {WEB_SEARCH_RESULT_COUNT: $n})}' <<< "$retrieval")"
-    if owui_api POST "/api/v1/retrieval/config/update" <<< "$body" >/dev/null; then
-      ok "Documents Top K set to ${OPENWEBUI_RAG_TOP_K} and web search results to ${OPENWEBUI_WEB_SEARCH_RESULT_COUNT}."
+  local shape='has("TOP_K") and has("TOP_K_RERANKER") and has("ENABLE_RAG_HYBRID_SEARCH") and has("RAG_RERANKING_MODEL") and (.web | type == "object" and has("WEB_SEARCH_RESULT_COUNT"))'
+  if retrieval="$(owui_get_checked "/api/v1/retrieval/config" "$shape")"; then
+    body="$(jq --argjson k "$OPENWEBUI_RAG_TOP_K" --argjson kr "$OPENWEBUI_RAG_TOP_K_RERANKER" \
+      --arg rm "$OPENWEBUI_RERANKING_MODEL" --argjson n "$OPENWEBUI_WEB_SEARCH_RESULT_COUNT" \
+      '{TOP_K: $k, TOP_K_RERANKER: $kr, ENABLE_RAG_HYBRID_SEARCH: true, RAG_RERANKING_ENGINE: "",
+        RAG_RERANKING_MODEL: $rm, web: (.web + {WEB_SEARCH_RESULT_COUNT: $n})}' <<< "$retrieval")"
+    echo "Applying document search settings (Open WebUI loads the re-ranking model now)..."
+    if OWUI_API_MAX_TIME=900 owui_api POST "/api/v1/retrieval/config/update" <<< "$body" >/dev/null; then
+      # Open WebUI turns hybrid search off again when the re-ranking model fails to load.
+      if owui_get_checked "/api/v1/retrieval/config" '.ENABLE_RAG_HYBRID_SEARCH == true' >/dev/null; then
+        ok "Hybrid search with re-ranking on; web search results set to ${OPENWEBUI_WEB_SEARCH_RESULT_COUNT}."
+      else
+        fail "Open WebUI could not load the re-ranking model; hybrid search stays off. Check: journalctl -u openwebui -e"
+      fi
     else
-      fail "Open WebUI rejected the retrieval settings."
+      fail "Open WebUI rejected the retrieval settings (or loading the re-ranking model timed out)."
     fi
   else
     owui_api_changed "/api/v1/retrieval/config"

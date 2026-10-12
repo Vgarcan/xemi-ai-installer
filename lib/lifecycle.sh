@@ -151,9 +151,10 @@ uninstall_stack() {
   load_manifest
 
   if [ "$purge" = "1" ]; then
-    echo "This will purge services, Open WebUI, Open WebUI tools, Ollama binaries/data, firewall rules and created users."
+    echo "This will purge services, Open WebUI, Open WebUI tools, HTTPS access, Ollama binaries/data, firewall rules and created users."
+    echo "Open WebUI backup archives are kept."
   else
-    echo "This will uninstall services, Open WebUI venv, Open WebUI tools and firewall rules while keeping Ollama binaries/models."
+    echo "This will uninstall services, Open WebUI venv, Open WebUI tools, HTTPS access, scheduled backups and firewall rules while keeping Ollama binaries/models and backup archives."
   fi
 
   local ans
@@ -165,6 +166,8 @@ uninstall_stack() {
   fi
 
   remove_firewall_configuration
+  remove_https
+  remove_openwebui_backups "$purge"
   remove_openwebui_extras "$purge"
   remove_openwebui_installation "$purge"
   remove_ollama_installation "$purge"

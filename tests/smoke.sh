@@ -24,6 +24,16 @@ source "${ROOT_DIR}/lib/extras.sh"
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/lib/owui_api.sh"
 # shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/https.sh"
+# shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/backup.sh"
+# shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/voice.sh"
+# shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/jupyter.sh"
+# shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/browser.sh"
+# shellcheck source=/dev/null
 source "${ROOT_DIR}/lib/services.sh"
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/lib/cli.sh"
@@ -73,7 +83,7 @@ load_manifest
 [ "$OPEN_TERMINAL_PORT" = "8000" ]
 [ "$TIKA_INSTALLED_VERSION" = "3.3.2" ]
 [ "$TIKA_VERSION" != "" ]
-[ "$(openwebui_extras_table | wc -l)" = "4" ]
+[ "$(openwebui_extras_table | cut -d'|' -f1 | paste -sd' ' -)" = "open-terminal mcpo searxng tika piper-tts jupyter playwright" ]
 
 OPEN_TERMINAL_HOME="$TEST_DIR/open-terminal"
 mkdir -p "$OPEN_TERMINAL_HOME/.local/state/open-terminal/logs"
@@ -191,6 +201,94 @@ assert_rejected doctor
   [[ "$(doctor_check_ollama_exposure)" = WARN*"all interfaces"* ]]
 )
 
+# HTTPS front end: host list validation, generated Caddyfile and the capability it keeps.
+(
+  validate_https_hosts "svr32ai,svr32ai.lan,192.168.2.132"
+  assert_rejected validate_https_hosts ""
+  assert_rejected validate_https_hosts "svr32ai, 192.168.2.132"
+  assert_rejected validate_https_hosts "svr32ai;id"
+  HTTPS_CONFIG_DIR="$TEST_DIR/https"
+  HTTPS_DATA_DIR="$TEST_DIR/https-data"
+  OPENWEBUI_PORT=3000
+  write_https_caddyfile 443 "svr32ai,192.168.2.132"
+  grep -q '^	default_sni 192.168.2.132$' "$HTTPS_CONFIG_DIR/Caddyfile"
+  # 127.0.0.1 gets its own site so local health checks reach Open WebUI, not Caddy's empty 200.
+  grep -q '^https://svr32ai:443, https://192.168.2.132:443, https://127.0.0.1:443 {$' "$HTTPS_CONFIG_DIR/Caddyfile"
+  write_https_caddyfile 8443 "127.0.0.1,svr32ai"
+  grep -q '^https://127.0.0.1:8443, https://svr32ai:8443 {$' "$HTTPS_CONFIG_DIR/Caddyfile"
+  grep -q 'reverse_proxy 127.0.0.1:3000' "$HTTPS_CONFIG_DIR/Caddyfile"
+  eval "$(declare -f write_extra_hardening | sed "s#/etc/systemd/system/#$TEST_DIR/units/#")"
+  write_extra_hardening "$HTTPS_SERVICE"
+  write_extra_hardening tika
+  grep -qx 'CapabilityBoundingSet=CAP_NET_BIND_SERVICE' "$TEST_DIR/units/${HTTPS_SERVICE}.service.d/xemi-hardening.conf"
+  grep -qx 'CapabilityBoundingSet=' "$TEST_DIR/units/tika.service.d/xemi-hardening.conf"
+  grep -qx 'SuccessExitStatus=143' "$TEST_DIR/units/tika.service.d/xemi-hardening.conf"
+)
+
+# Backups: the generated script copies a live SQLite database, rotates, and keeps tagged archives.
+(
+  validate_backup_time "03:30"
+  assert_rejected validate_backup_time "24:00"
+  validate_backup_keep 7
+  assert_rejected validate_backup_keep 0
+  OPENWEBUI_DATA_DIR="$TEST_DIR/owui-data"
+  OPENWEBUI_VENV="$TEST_DIR/owui-venv"
+  OWUI_BACKUP_SCRIPT="$TEST_DIR/xemi-openwebui-backup"
+  dest="$TEST_DIR/backups"
+  mkdir -p "$OPENWEBUI_DATA_DIR/uploads" "$OPENWEBUI_VENV/bin"
+  ln -s "$(command -v python3)" "$OPENWEBUI_VENV/bin/python"
+  printf '#!/bin/sh\necho "Version: 0.11.3"\n' > "$OPENWEBUI_VENV/bin/pip"
+  chmod +x "$OPENWEBUI_VENV/bin/pip"
+  python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("pragma journal_mode=wal"); c.execute("create table chat(id)"); c.execute("insert into chat values (42)"); c.commit()' "$OPENWEBUI_DATA_DIR/webui.db"
+  echo "secret" > "$OPENWEBUI_DATA_DIR/.webui_secret_key"
+  echo "doc" > "$OPENWEBUI_DATA_DIR/uploads/a.txt"
+  write_owui_backup_script "$dest" 1
+  bash -n "$OWUI_BACKUP_SCRIPT"
+  "$OWUI_BACKUP_SCRIPT" > /dev/null
+  sleep 1
+  "$OWUI_BACKUP_SCRIPT" > /dev/null
+  "$OWUI_BACKUP_SCRIPT" pre-restore > /dev/null
+  [ "$(ls "$dest"/openwebui-2*.tar.gz | wc -l)" = "1" ]
+  [ "$(ls "$dest"/openwebui-pre-restore-*.tar.gz | wc -l)" = "1" ]
+  archive="$(ls "$dest"/openwebui-2*.tar.gz)"
+  [ "$(tar -xzOf "$archive" open-webui-version)" = "0.11.3" ]
+  tar -tzf "$archive" | grep -qx 'data/uploads/a.txt'
+  mkdir -p "$TEST_DIR/restored"
+  tar -xzf "$archive" -C "$TEST_DIR/restored"
+  [ "$(python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("select id from chat").fetchone()[0])' "$TEST_DIR/restored/data/webui.db")" = "42" ]
+  # The temporary work directory is always cleaned up.
+  ! compgen -G "$dest/.work.*" > /dev/null
+)
+
+# Extra MCP servers: catalog lookup and the argument list written to mcpo's config.
+[ "$(mcp_catalog_field wikipedia 2)" = "wikipedia-mcp" ]
+[ "$(printf '%s\n' $(mcp_catalog_field wikipedia 4) | jq -R . | jq -s -c .)" = '["--language","es"]' ]
+assert_rejected mcp_catalog_field nosuchserver 2
+# mcpo installed without extra servers: removal and update must not trip over set -u.
+(
+  unset MCP_EXTRA_SERVERS
+  MCP_SERVERS_DIR="$TEST_DIR/no-mcp-servers"
+  remove_manifest_key() { :; }
+  remove_all_mcp_extras
+  update_mcp_extras
+)
+# Syntax check without writing __pycache__ into the repository.
+python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "${ROOT_DIR}/lib/piper_openai_server.py"
+
+# Voice: Whisper language validation and the value written to openwebui.env.
+(
+  validate_whisper_language es
+  validate_whisper_language auto
+  assert_rejected validate_whisper_language spanish
+  OPENWEBUI_ENV_FILE="$TEST_DIR/openwebui.env"
+  OPENWEBUI_WHISPER_LANGUAGE=es
+  write_openwebui_env_file 3000 http://127.0.0.1:11434
+  grep -qx 'WHISPER_LANGUAGE=es' "$OPENWEBUI_ENV_FILE"
+  OPENWEBUI_WHISPER_LANGUAGE=auto
+  write_openwebui_env_file 3000 http://127.0.0.1:11434
+  grep -qx 'WHISPER_LANGUAGE=' "$OPENWEBUI_ENV_FILE"
+)
+
 # Open WebUI connections against a fake API: GET serves canned JSON, POST records the body.
 (
   OWUI="$TEST_DIR/owui"
@@ -236,6 +334,39 @@ assert_rejected doctor
   : > "$OWUI/post_api_v1_retrieval_config_update.json"
   owui_disconnect_searxng
   [ ! -s "$OWUI/post_api_v1_retrieval_config_update.json" ]
+
+  # Piper: only the tts part changes; stt stays as it was. Removal undoes only our own setting.
+  serve /api/v1/audio/config '{"tts":{"ENGINE":"","OPENAI_API_BASE_URL":"https://api.openai.com/v1","OPENAI_API_KEY":"","MODEL":"tts-1","VOICE":"alloy","SPLIT_ON":"punctuation"},"stt":{"ENGINE":"","WHISPER_MODEL":"base","KEEP":1}}'
+  PIPER_PORT=8002
+  owui_connect_piper_tts
+  [ "$(posted /api/v1/audio/config/update | jq -c '[.tts.ENGINE, .tts.OPENAI_API_BASE_URL, .tts.VOICE, .stt.WHISPER_MODEL, .stt.KEEP]')" \
+    = "[\"openai\",\"http://127.0.0.1:8002/v1\",\"${PIPER_DEFAULT_VOICE}\",\"base\",1]" ]
+  serve /api/v1/audio/config '{"tts":{"ENGINE":"openai","OPENAI_API_BASE_URL":"https://tts.example.org/v1","VOICE":"x"},"stt":{"ENGINE":"","WHISPER_MODEL":"small"}}'
+  : > "$OWUI/post_api_v1_audio_config_update.json"
+  owui_disconnect_piper_tts
+  [ ! -s "$OWUI/post_api_v1_audio_config_update.json" ]
+
+  # Jupyter: both engines move to Jupyter; "no" (the default) limits the interpreter to admins.
+  JUPYTER_ENV_FILE="$OWUI/jupyter.env"
+  echo "JUPYTER_TOKEN=jtok" > "$JUPYTER_ENV_FILE"
+  JUPYTER_PORT=8890
+  ASSUME_YES=1
+  serve /api/v1/configs/code_execution '{"ENABLE_CODE_EXECUTION":true,"CODE_EXECUTION_ENGINE":"pyodide","CODE_EXECUTION_JUPYTER_URL":"","ENABLE_CODE_INTERPRETER":true,"CODE_INTERPRETER_ENGINE":"pyodide","CODE_INTERPRETER_JUPYTER_URL":"","CODE_INTERPRETER_PROMPT_TEMPLATE":"keep"}'
+  serve /api/v1/users/default/permissions '{"workspace":{},"chat":{},"features":{"code_interpreter":true,"web_search":true}}'
+  owui_connect_jupyter
+  [ "$(posted /api/v1/configs/code_execution | jq -c '[.CODE_EXECUTION_ENGINE, .CODE_INTERPRETER_ENGINE, .CODE_INTERPRETER_JUPYTER_URL, .CODE_INTERPRETER_JUPYTER_AUTH_TOKEN, .CODE_INTERPRETER_PROMPT_TEMPLATE]')" \
+    = '["jupyter","jupyter","http://127.0.0.1:8890","jtok","keep"]' ]
+  [ "$(posted /api/v1/users/default/permissions | jq -c '.features')" = '{"code_interpreter":false,"web_search":true}' ]
+  grep -q '^JUPYTER_PERMISSION_CHANGED=1$' "$MANIFEST_FILE"
+  remove_manifest_key JUPYTER_PERMISSION_CHANGED
+  ASSUME_YES=0
+
+  # Chromium web loader: the web section is sent back complete with only the loader fields changed.
+  serve /api/v1/retrieval/config '{"web":{"WEB_LOADER_ENGINE":"","PLAYWRIGHT_WS_URL":"","SEARXNG_QUERY_URL":"keep"}}'
+  PLAYWRIGHT_PORT=8003
+  owui_connect_playwright
+  [ "$(posted /api/v1/retrieval/config/update | jq -c '.web')" \
+    = '{"WEB_LOADER_ENGINE":"playwright","PLAYWRIGHT_WS_URL":"ws://127.0.0.1:8003/","SEARXNG_QUERY_URL":"keep","PLAYWRIGHT_TIMEOUT":15000}' ]
 )
 
 echo "Smoke tests passed."

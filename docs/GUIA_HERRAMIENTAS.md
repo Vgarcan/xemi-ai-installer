@@ -12,7 +12,10 @@ Esta guía explica cómo usar en el chat las herramientas que el instalador aña
 | **Documentos** (Apache Tika) | Hacer preguntas sobre PDF, Word, Excel y PowerPoint | Más (+) › Subir Archivos o Adjuntar Conocimiento |
 | **time** (mcpo) | Hora actual y conversiones entre zonas horarias | Herramientas |
 | **fetch** (mcpo) | Leer y resumir una página web concreta | Herramientas |
+| **wikipedia** y **arxiv** (mcpo) | Consultar la Wikipedia en español y buscar artículos científicos | Herramientas |
 | **Terminal** (Open Terminal) | Ejecutar comandos, analizar datos, crear y modificar archivos | Integraciones › Terminal |
+| **Interprete de Código** (Jupyter) | Que el modelo calcule con Python y dibuje gráficos dentro del chat | Integraciones › Interprete de Código |
+| **Voz** (Whisper y Piper) | Dictar en vez de escribir y escuchar las respuestas | Botones Dictar y Modo de Voz; altavoz en cada respuesta |
 
 Todas funcionan dentro del servidor. Tus documentos y conversaciones no salen de él; solo las búsquedas web y las páginas que pidas leer viajan a internet.
 
@@ -48,6 +51,7 @@ Consejos:
 - **Comprueba las fuentes** en temas importantes. Pulsa una cita para abrirla: el modelo resume lo que encontró y puede equivocarse.
 - **No pongas datos confidenciales** en una pregunta con la búsqueda activada: las consultas se envían a buscadores públicos (de forma anónima, a través de SearXNG).
 - Desactiva la búsqueda cuando no la necesites; las respuestas serán más rápidas.
+- Si el administrador instaló el lector con Chromium, también se leen bien las páginas que cargan su contenido con JavaScript (tiendas, webs modernas).
 
 ## 2. Trabajar con documentos
 
@@ -61,7 +65,7 @@ Hay dos formas de usar documentos:
 | Cómo | Más (+) › **Subir Archivos**, o arrastra el archivo al chat | Créala en **Espacio de Trabajo › Conocimiento** y en el chat usa Más (+) › **Adjuntar Conocimiento**, o escribe **#** y elígela |
 | Dura | Solo en ese chat | Hasta que la borres; se puede compartir con otros usuarios |
 
-Formatos: PDF, Word, Excel, PowerPoint, texto, Markdown, CSV y similares. Apache Tika extrae el texto en el servidor.
+Formatos: PDF, Word, Excel, PowerPoint, texto, Markdown, CSV y similares, también **PDF escaneados e imágenes con texto**: Apache Tika extrae el texto en el servidor y aplica OCR (reconocimiento de texto) en español e inglés cuando la página no tiene texto.
 
 Ejemplos:
 
@@ -71,8 +75,8 @@ Ejemplos:
 
 Ten en cuenta:
 
-- **El modelo no lee el documento entero de golpe**: busca los 5 fragmentos más relacionados con tu pregunta. Pregunta por temas concretos. Para resumir un documento largo, pide el resumen por capítulos o secciones.
-- **Los PDF escaneados no funcionan**: son imágenes y el servidor no tiene OCR. Pasa el documento por un programa con OCR antes de subirlo, o pega el texto.
+- **El modelo no lee el documento entero de golpe**: el servidor busca los fragmentos relacionados con tu pregunta (por significado y por palabras clave), los reordena con un modelo de relevancia y entrega los 5 mejores. Pregunta por temas concretos. Para resumir un documento largo, pide el resumen por capítulos o secciones.
+- **Los PDF escaneados tardan más**: el OCR procesa cada página como una imagen. La calidad depende del escaneo; con fotos torcidas o borrosas el texto puede salir con errores.
 - Si una respuesta no encaja con el documento, pide al modelo que cite el fragmento en el que se basa.
 
 ## 3. Hora y lectura de páginas (herramientas MCP)
@@ -87,6 +91,10 @@ Ten en cuenta:
 |---|---|
 | time | «¿Qué hora es ahora en Tokio?» · «Si son las 10:00 en Madrid, ¿qué hora es en Nueva York?» |
 | fetch | «Resume esta página: https://…» · «Lee esta noticia y dime qué cifras da: https://…» |
+| wikipedia | «Según la Wikipedia, ¿cuándo se fundó la Universidad de Salamanca?» · «Resume el artículo sobre la fotosíntesis» |
+| arxiv | «Busca en arXiv artículos recientes sobre reranking para RAG y resume los tres primeros» |
+
+wikipedia y arxiv solo aparecen si el administrador los añadió.
 
 **fetch o Búsqueda Web:**
 
@@ -129,6 +137,40 @@ Qué puede hacer y qué no:
 - **No escribas contraseñas ni claves** en el chat ni en archivos del terminal.
 - **Revisa lo que hace el modelo** antes de usar sus resultados, sobre todo si modifica o borra archivos.
 
+## 5. Cálculos y gráficos (Interprete de Código)
+
+Si el administrador instaló Jupyter, el **Interprete de Código** ejecuta Python en el servidor, con pandas, numpy y matplotlib, y los gráficos aparecen dentro de la respuesta.
+
+1. Abre **Integraciones** y activa **Interprete de Código** (si no aparece, no tienes permiso: pídeselo al administrador).
+2. Pide cálculos o gráficos: el modelo escribe el código, lo ejecuta y te muestra el resultado.
+
+Ejemplos:
+
+- «Con estos datos (pega una tabla), calcula la media y la desviación por mes y haz un gráfico de líneas.»
+- «Sube el Excel adjunto y dime qué producto creció más entre trimestres; dibuja un gráfico de barras.»
+- «¿Cuánto es la cuota de un préstamo de 150.000 € a 25 años al 3,1 %? Haz la tabla del primer año.»
+
+Ten en cuenta:
+
+- El código se ejecuta en el servidor con los mismos límites que el terminal (sin `sudo`, solo en su carpeta). La carpeta de trabajo es **compartida**: no dejes datos confidenciales.
+- Revisa el código y el resultado: el modelo puede equivocarse al programar.
+
+## 6. Voz: dictar y escuchar
+
+- **Dictar**: pulsa **Dictar** en la barra de escritura y habla; el texto aparece en el mensaje. **Modo de Voz** abre una conversación hablada. La transcripción se hace en el servidor (Whisper), sin enviar el audio fuera.
+- **Escuchar**: en cada respuesta, el botón de altavoz la lee en voz alta (Piper, voces en español). Puedes elegir otra voz en Ajustes › Audio.
+- El micrófono **solo funciona en la dirección `https://`** del servidor (ver la sección siguiente).
+
+## Acceso seguro (HTTPS) y dictado por voz
+
+Si el administrador activó HTTPS, entra en Open WebUI por la dirección `https://` que te indique (por ejemplo `https://svr32ai`). Así la conexión va cifrada y, además, el navegador te deja usar el micrófono para **Dictar** y el **Modo de Voz**; en la dirección `http://` los navegadores lo bloquean.
+
+La primera vez el navegador avisará de que no reconoce el certificado, porque lo emite el propio servidor. Para quitar el aviso, instala una vez el certificado raíz:
+
+1. Descárgalo desde `https://<dirección del servidor>/xemi-ca.crt` (acepta el aviso esa única vez).
+2. Comprueba con el administrador que la huella SHA-256 coincide.
+3. Instálalo como autoridad de certificación de confianza: el administrador tiene los pasos para Windows, macOS, Linux, Android e iOS (opción «Show HTTPS addresses and root certificate» del instalador).
+
 ## Combinaciones útiles
 
 | Combinación | Ejemplo |
@@ -144,9 +186,12 @@ Qué puede hacer y qué no:
 | No veo «Herramientas» o el terminal | Tu usuario no tiene acceso | Pídeselo al administrador |
 | El modelo no usa la herramienta | Modelo demasiado pequeño, o la herramienta no está activada en este chat | Usa un modelo de la familia qwen3.5 y comprueba el menú; dile explícitamente «usa la herramienta fetch» |
 | La búsqueda no devuelve nada | Pregunta muy genérica, o el servicio de búsqueda está caído | Concreta la pregunta; si sigue fallando, avisa al administrador |
-| El documento «no tiene texto» | PDF escaneado | Pásalo por OCR o pega el texto |
+| El documento «no tiene texto» o sale con errores | Escaneo de baja calidad, o el OCR no está activado en el servidor | Prueba con un escaneo más nítido; si nunca funciona, avisa al administrador |
+| El navegador no deja usar el micrófono | La página no es HTTPS | Entra por la dirección `https://` (ver «Acceso seguro») |
 | La respuesta ignora parte del documento | El modelo solo ve los fragmentos más relevantes | Pregunta por secciones concretas |
 | La respuesta se corta o el chat da error con mucho texto | Se superó el contexto del modelo | Empieza un chat nuevo o adjunta menos documentos a la vez |
+| Con varias herramientas activas el modelo responde peor o se corta antes | Cada herramienta activa ocupa contexto con su descripción, y la búsqueda web añade el texto de las páginas | Activa solo las herramientas que necesites en ese chat |
+| La búsqueda web cita menos fuentes de las esperadas | Alguna página no respondió a tiempo o bloquea los accesos automáticos | Repite la pregunta o pega directamente la dirección de la página |
 
 ## Para el administrador
 
@@ -185,11 +230,60 @@ En **Espacio de Trabajo › Modelos › (modelo) › Editar › Parámetros Avan
 | Comprobación general (incluye herramientas y aislamiento) | 8) Diagnostics › Run doctor readiness check | `doctor` |
 | Conectar o reconectar las herramientas a Open WebUI | 5) Open WebUI tools › Connect installed tools to Open WebUI | `tools-connect` |
 | Actualizar las herramientas y su aislamiento | 5) Open WebUI tools › Update installed tools | `tools-update` |
-| Modelo de tareas, Top K y número de resultados | 4) Open WebUI › Apply recommended settings | — |
+| Modelo de tareas, búsqueda híbrida con reranker y número de resultados | 4) Open WebUI › Apply recommended settings | — |
+| Copias de seguridad de Open WebUI | 4) Open WebUI › Backups | `backup-setup`, `backup-now` |
+| Acceso HTTPS y certificado raíz | 6) Network › Enable HTTPS / Show HTTPS addresses | `https-setup`, `https-info` |
+| Añadir OCR a Tika en una instalación anterior | 5) Open WebUI tools › Update installed tools | `tools-update` |
+| Dictado (Whisper) e idioma, voz de las respuestas | 4) Open WebUI › Voice settings | `voice-setup` |
+| Instalar voz, Jupyter o el lector con Chromium | 5) Open WebUI tools › Install … | `piper-tts`, `jupyter`, `chromium` |
+| Añadir o quitar Wikipedia y arXiv | 5) Open WebUI tools › Add or remove MCP servers in mcpo | `mcp-servers` |
 | Contexto y caché de los modelos | 2) Ollama › Tune model memory | `ollama-tune` |
 | Uso de GPU y modelos cargados | 7) Services › GPU usage | `gpu` |
 
 Los comandos se ejecutan como `sudo /usr/local/bin/xemi_ai_install.sh <comando>`.
+
+### HTTPS
+
+`6) Network › Enable HTTPS access for Open WebUI` pone Caddy delante de Open WebUI, con una autoridad de certificación propia del servidor:
+
+- Pregunta los nombres y las IP que usan los usuarios (por defecto, el nombre del servidor y sus IP) y el puerto (443).
+- Abre ese puerto solo para la red local en el firewall.
+- El certificado raíz se descarga en `https://<servidor>/xemi-ca.crt`. `Show HTTPS addresses and root certificate` muestra su huella SHA-256 y cómo instalarlo en cada sistema.
+- La dirección `http://…:3000` sigue funcionando; indica a los usuarios que usen la de HTTPS.
+- Al quitarlo se borran el servicio, la regla del firewall y la autoridad de certificación. Si vuelves a activarlo, se crea una nueva y hay que reinstalar el certificado en los equipos.
+
+### Copias de seguridad
+
+`4) Open WebUI › Backups` programa una copia diaria de Open WebUI: chats, usuarios, ajustes, conocimiento, archivos subidos e índice de búsqueda. La base de datos se copia de forma consistente aunque Open WebUI esté en uso.
+
+- **Schedule daily backups**: carpeta, hora y cuántas copias conservar (7 por defecto). Si la carpeta está en el mismo disco que Open WebUI, el instalador lo avisa: copia las copias también a otro sitio.
+- **Restore a backup**: antes de restaurar guarda una copia `pre-restore` del estado actual; si Open WebUI no arranca con los datos restaurados, vuelve solo a los anteriores. No restaura copias de una versión de Open WebUI más nueva que la instalada.
+- Las copias contienen las conversaciones de todos los usuarios: el directorio es solo para root. Nunca se borran automáticamente al desinstalar.
+
+### Interprete de Código en el servidor (Jupyter)
+
+`5) Open WebUI tools › Install Jupyter code interpreter` instala Jupyter y lo conecta como motor de **Ejecución de código** y de **Interprete de Código**. Por defecto Open WebUI deja usar el intérprete a todos; al conectar, el instalador pregunta si mantenerlo y, si respondes que no, lo deja solo para administradores. Para dárselo a un grupo: **Administración › Usuarios › Grupos › (grupo) › Permisos › Interprete de Código**. Al quitar Jupyter, Open WebUI vuelve a ejecutar el código en el navegador (Pyodide) y se restaura el permiso anterior.
+
+### Voz
+
+- `5) Open WebUI tools › Install Piper text to speech` instala las voces `es_ES-davefx`, `es_ES-sharvard` y `en_US-lessac` y las conecta como voz de las respuestas.
+- `4) Open WebUI › Voice settings` pone el dictado en Whisper `small` (el modelo por defecto, `base`, se equivoca en español) y fija el idioma (`es`, o `auto` para detectarlo). Cambiar el idioma reinicia Open WebUI durante un minuto y corta las respuestas que se estén generando: el instalador lo avisa y pide confirmación. Hazlo cuando nadie esté usando el chat.
+
+### Lector de páginas con Chromium
+
+`5) Open WebUI tools › Install Chromium web loader` hace que Open WebUI lea las páginas con un Chromium sin interfaz, en su propio usuario y aislado. Usa la versión de Playwright que declara Open WebUI y se resincroniza solo al actualizar Open WebUI. Instala también las fuentes del sistema (sin ellas Chromium se cierra en páginas con fuentes web) y, dentro de Open WebUI, el paquete `unstructured` que usa para extraer el texto, respetando las versiones que fija Open WebUI.
+
+### Buscadores de SearXNG
+
+Desde una sola IP de servidor, DuckDuckGo, Brave y Google acaban respondiendo con CAPTCHA o límites de uso y no devuelven nada. El instalador activa además Bing y Yahoo en `/etc/searxng/settings.yml` al instalar SearXNG y en `Update installed tools`.
+
+### Servidores MCP adicionales
+
+`5) Open WebUI tools › Add or remove MCP servers in mcpo` añade o quita `wikipedia` (Wikipedia en español) y `arxiv` (artículos científicos). Tras el cambio ofrece actualizar la conexión en Open WebUI; si no lo haces, la lista de herramientas de Open WebUI no reflejará el cambio.
+
+### Búsqueda en documentos (reranker)
+
+`4) Open WebUI › Apply recommended settings` activa la búsqueda híbrida: busca 10 fragmentos candidatos por significado y por palabras clave y un modelo multilingüe de relevancia (`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`) elige los 5 mejores. Corre en la CPU (unos 0,5 s por consulta en este servidor), sin quitar memoria de la GPU a los modelos. Open WebUI lo descarga (unos 470 MB) al aplicar el ajuste.
 
 ### Documentos en español: modelo de incrustación
 

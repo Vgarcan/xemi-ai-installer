@@ -523,6 +523,9 @@ doctor() {
   echo ""
 
   doctor_check_openwebui_extras
+  doctor_check_https
+  doctor_check_backups
+  echo ""
 
   doctor_check_firewall
   echo ""

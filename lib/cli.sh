@@ -123,7 +123,24 @@ show_dry_run_plan() {
       echo "Plan: collect status, units, logs and reports, redact secrets and e-mails, and write"
       echo "      ${DIAG_DIR}/xemi-diag-<host>-<time>.tar.gz (mode 600)."
       ;;
-    doctor|status|state|report|info|menu|tools-status|services|gpu)
+    piper-tts|jupyter|chromium|mcp-servers)
+      echo "Plan: install ${cmd} natively under /opt as a hardened service on 127.0.0.1;"
+      echo "      with --yes the Open WebUI connection is skipped (run tools-connect afterwards)."
+      ;;
+    backup-setup|voice-setup)
+      echo "Plan: change Open WebUI settings (${cmd}); voice-setup needs an Open WebUI admin login."
+      ;;
+    https-setup)
+      echo "Plan:"
+      echo "  1. Download Caddy ${CADDY_VERSION} (SHA512 verified) into ${HTTPS_BIN_DIR}; no RPM, no SELinux changes."
+      echo "  2. Create the ${HTTPS_USER} service user and a local certificate authority in ${HTTPS_DATA_DIR}."
+      echo "  3. Proxy https://<names>:${HTTPS_PORT_DEFAULT} to Open WebUI, hardened unit ${HTTPS_SERVICE}."
+      echo "  4. Allow the HTTPS port from the LAN subnet in firewalld."
+      ;;
+    backup-now)
+      echo "Plan: run ${OWUI_BACKUP_SCRIPT} once (consistent SQLite copy, uploads, vector index)."
+      ;;
+    doctor|status|state|report|info|menu|tools-status|services|gpu|https-info)
       echo "Plan: run read-oriented command '${cmd}'."
       ;;
     *)
@@ -188,9 +205,9 @@ menu() {
     menu_group 1 "Guided installation" "full setup / repair, NVIDIA drivers, AI stack"
     menu_group 2 "Ollama" "install, LAN service, model memory, status, health, remove"
     menu_group 3 "Models" "storage directory, install, list, test, remove"
-    menu_group 4 "Open WebUI" "Python 3.11, install, updates, rollback, health check"
-    menu_group 5 "Open WebUI tools" "Open Terminal, MCP tools, web search, document extraction"
-    menu_group 6 "Network" "LAN firewall, ports and service bindings"
+    menu_group 4 "Open WebUI" "install, updates, rollback, recommended settings, backups"
+    menu_group 5 "Open WebUI tools" "terminal, MCP tools, web search, documents + OCR, voice, Jupyter, Chromium"
+    menu_group 6 "Network" "LAN firewall, HTTPS access, ports and service bindings"
     menu_group 7 "Services" "status and ports, start/stop/restart, logs, GPU, diagnostics"
     menu_group 8 "Diagnostics" "GPU info, doctor check, installation report"
     menu_group 9 "Uninstall" "remove stack (keep Ollama data), purge to zero"
@@ -226,18 +243,27 @@ menu() {
            "Check/apply Open WebUI updates|update_openwebui" \
            "Rollback last Open WebUI update|rollback_openwebui" \
            "Open WebUI health check|openwebui_health_check" \
-           "Apply recommended settings (task model, documents, web search)|apply_openwebui_recommended_settings" ;;
+           "Apply recommended settings (task model, document search, web search)|apply_openwebui_recommended_settings" \
+           "Backups (schedule, run now, list, restore)|openwebui_backups_menu" \
+           "Voice settings (dictation language and Whisper, Piper voices)|configure_openwebui_voice" ;;
       5) run_submenu "Open WebUI Tools" \
            "Install Open Terminal (shell, files and code execution for models)|install_open_terminal" \
            "Install mcpo (MCP tools: time, web page fetch)|install_mcpo" \
            "Install SearXNG (private web search)|install_searxng" \
            "Install Apache Tika (PDF/Office text extraction)|install_tika" \
+           "Install Piper text to speech (natural voices)|install_piper_tts" \
+           "Install Jupyter code interpreter (Python on the server)|install_jupyter" \
+           "Install Chromium web loader (Playwright, JavaScript pages)|install_browser" \
+           "Add or remove MCP servers in mcpo (Wikipedia, arXiv)|manage_mcp_extras" \
            "Connect installed tools to Open WebUI|connect_openwebui_extras" \
            "Show tools status and Open WebUI connection settings|show_openwebui_extras_status" \
            "Update installed tools|update_openwebui_extras" \
            "Remove tools (interactive)|remove_openwebui_extras_interactive" ;;
       6) run_submenu "Network" \
            "Configure firewall (LAN only)|configure_firewall_lan_only" \
+           "Enable HTTPS access for Open WebUI (local certificate)|install_https" \
+           "Show HTTPS addresses and root certificate|show_https_info" \
+           "Remove HTTPS access|remove_https_interactive" \
            "Show ports in use and service bindings|show_ports_and_services" ;;
       7) run_submenu "Services" \
            "Show status of all services|show_services_status" \
@@ -289,6 +315,16 @@ Commands:
   services    Show status and ports of all managed systemd services
   gpu         Show GPU usage by service and models loaded in Ollama
   diag-bundle Export a redacted diagnostic bundle (.tar.gz)
+  https-setup Enable HTTPS access for Open WebUI (Caddy, local certificate)
+  piper-tts   Install Piper text to speech
+  jupyter     Install Jupyter as the Open WebUI code interpreter
+  chromium    Install the Chromium (Playwright) web loader
+  mcp-servers Add or remove extra MCP servers in mcpo (Wikipedia, arXiv)
+  backup-setup
+              Schedule daily Open WebUI backups
+  voice-setup Set dictation (Whisper model and language) and Piper voice in Open WebUI
+  https-info  Show HTTPS addresses and the root certificate to install
+  backup-now  Run an Open WebUI backup now (after scheduling them)
   tools-update
               Update installed Open WebUI tools
   doctor      Run readiness checks
@@ -499,6 +535,15 @@ main() {
     tools-connect) connect_openwebui_extras ;;
     services) show_services_status ;;
     gpu) show_gpu_usage ;;
+    https-setup) install_https ;;
+    piper-tts) install_piper_tts ;;
+    jupyter) install_jupyter ;;
+    chromium) install_browser ;;
+    mcp-servers) manage_mcp_extras ;;
+    backup-setup) configure_openwebui_backups ;;
+    voice-setup) configure_openwebui_voice ;;
+    https-info) show_https_info ;;
+    backup-now) run_openwebui_backup_now ;;
     diag-bundle) export_diagnostic_bundle ;;
     tools-update) update_openwebui_extras ;;
     doctor) doctor ;;

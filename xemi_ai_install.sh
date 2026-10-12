@@ -38,6 +38,16 @@ source "${SCRIPT_DIR}/lib/extras.sh"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/owui_api.sh"
 # shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/https.sh"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/backup.sh"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/voice.sh"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/jupyter.sh"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/browser.sh"
+# shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/services.sh"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/lib/diagnostics.sh"

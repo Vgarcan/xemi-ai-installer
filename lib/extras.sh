@@ -32,7 +32,8 @@ wait_http_ok() {
   local attempts="${2:-60}"
   local i
   for ((i=1; i<=attempts; i++)); do
-    if curl -fsS --max-time 5 "$url" >/dev/null 2>&1; then
+    # -k: local health checks only; the HTTPS front end uses a private certificate authority.
+    if curl -fsSk --max-time 5 "$url" >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
@@ -72,17 +73,19 @@ grant_group_read() {
   chmod -R g+rX,g-w "$@"
 }
 
-# Installs PACKAGE if missing and records the RPMs that transaction added, so removal can undo it.
+# Installs PACKAGES (space separated) if any is missing and records the RPMs that transaction
+# added under RECORD, so removal can undo it.
 install_tracked_package() {
-  local package="$1"
+  local -a packages=()
   local record="${EXTRAS_PACKAGES_DIR}/$2.list"
   local before after
-  if rpm -q "$package" >/dev/null 2>&1; then
+  read -r -a packages <<< "$1"
+  if rpm -q "${packages[@]}" >/dev/null 2>&1; then
     return 0
   fi
   mkdir -p "$EXTRAS_PACKAGES_DIR" || return 1
   before="$(rpm -qa --qf '%{NAME}\n' | sort -u)" || return 1
-  run_required "Installing ${package}..." dnf install -y "$package" || return 1
+  run_required "Installing ${packages[*]}..." dnf install -y "${packages[@]}" || return 1
   after="$(rpm -qa --qf '%{NAME}\n' | sort -u)" || return 1
   comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") > "$record"
 }
@@ -165,8 +168,24 @@ remove_unused_extras_identities() {
       warn "Open Terminal workspace kept with its owner ${TERMINAL_USER}: ${OPEN_TERMINAL_HOME}"
     fi
   fi
+  if [ "${JUPYTER_USER_CREATED:-}" = "1" ] && [ "${JUPYTER_INSTALLED:-}" != "1" ]; then
+    count="$(jupyter_user_files | wc -l)"
+    ans="yes"
+    if [ "$purge" != "1" ] && [ "$count" -gt 0 ]; then
+      ans="$(ask "Jupyter workspace ${JUPYTER_HOME} has ${count} file(s). Delete it yes or no" "no")"
+    fi
+    if is_yes "$ans"; then
+      remove_extras_identity "$JUPYTER_USER" "$JUPYTER_HOME" JUPYTER_USER_CREATED /var/lib
+    else
+      warn "Jupyter workspace kept with its owner ${JUPYTER_USER}: ${JUPYTER_HOME}"
+    fi
+  fi
+  if [ "${BROWSER_USER_CREATED:-}" = "1" ] && [ "${PLAYWRIGHT_INSTALLED:-}" != "1" ]; then
+    remove_extras_identity "$BROWSER_USER" "$BROWSER_HOME" BROWSER_USER_CREATED /var/lib
+  fi
   if [ "${EXTRAS_USER_CREATED:-}" = "1" ] && [ "${MCPO_INSTALLED:-}" != "1" ] \
-    && [ "${SEARXNG_INSTALLED:-}" != "1" ] && [ "${TIKA_INSTALLED:-}" != "1" ]; then
+    && [ "${SEARXNG_INSTALLED:-}" != "1" ] && [ "${TIKA_INSTALLED:-}" != "1" ] \
+    && [ "${PIPER_INSTALLED:-}" != "1" ]; then
     remove_extras_identity "$EXTRAS_USER" "$EXTRAS_HOME" EXTRAS_USER_CREATED /var/lib
   fi
 }
@@ -268,11 +287,17 @@ write_extra_hardening() {
   local dir="/etc/systemd/system/${name}.service.d"
   mkdir -p "$dir" || return 1
   {
+    echo "[Service]"
+    echo "UMask=0027"
+    # Only the HTTPS front end needs a capability: binding a port below 1024.
+    if [ "$name" = "$HTTPS_SERVICE" ]; then
+      echo "CapabilityBoundingSet=CAP_NET_BIND_SERVICE"
+      echo "AmbientCapabilities=CAP_NET_BIND_SERVICE"
+    else
+      echo "CapabilityBoundingSet="
+      echo "AmbientCapabilities="
+    fi
     cat <<'EOF'
-[Service]
-UMask=0027
-CapabilityBoundingSet=
-AmbientCapabilities=
 PrivateDevices=true
 ProtectKernelLogs=true
 ProtectClock=true
@@ -483,6 +508,7 @@ show_mcpo_connection() {
 remove_mcpo() {
   [ "${MCPO_INSTALLED:-}" = "1" ] || return 0
   remove_extra_service mcpo
+  remove_all_mcp_extras
   if [ -d "$MCPO_VENV" ]; then
     safe_rm_rf "$MCPO_VENV" /opt
   fi
@@ -495,6 +521,158 @@ remove_mcpo() {
   MCPO_INSTALLED=""
   ok "mcpo removed."
   owui_was_disconnected mcpo || warn "Also delete its tool server connections in Open WebUI: Admin settings > Integrations."
+}
+
+# ---------------------------------------------------------------------------
+# Extra MCP servers for mcpo (catalog in config.sh), one venv each
+# ---------------------------------------------------------------------------
+
+# Prints field N (1 name, 2 package, 3 command, 4 arguments) of catalog entry NAME.
+mcp_catalog_field() {
+  local name="$1"
+  local field="$2"
+  local entry
+  for entry in "${MCP_EXTRA_CATALOG[@]}"; do
+    if [ "${entry%%|*}" = "$name" ]; then
+      echo "$entry" | cut -d'|' -f"$field"
+      return 0
+    fi
+  done
+  return 1
+}
+
+mcp_extra_installed() {
+  [[ ",${MCP_EXTRA_SERVERS:-}," = *",$1,"* ]]
+}
+
+record_mcp_extras() {
+  local list="$1"
+  if [ -n "$list" ]; then
+    record_manifest "MCP_EXTRA_SERVERS" "$list"
+  else
+    remove_manifest_key MCP_EXTRA_SERVERS
+  fi
+  MCP_EXTRA_SERVERS="$list"
+}
+
+# Installs one catalog server into its own venv and registers it in mcpo's config.
+add_mcp_extra() {
+  local name="$1"
+  local package command args venv json_args
+  package="$(mcp_catalog_field "$name" 2)" || return 1
+  command="$(mcp_catalog_field "$name" 3)"
+  args="$(mcp_catalog_field "$name" 4)"
+  venv="${MCP_SERVERS_DIR}/${name}/venv"
+  mkdir -p "${MCP_SERVERS_DIR}/${name}" || return 1
+  create_extras_venv "$venv" "$EXTRAS_USER" "$package" || return 1
+  [ -x "${venv}/bin/${command}" ] || { fail "${package} did not install the ${command} command."; return 1; }
+  grant_group_read "$EXTRAS_USER" "$MCP_SERVERS_DIR" || return 1
+  if [ "$name" = "arxiv" ]; then
+    mkdir -p "${EXTRAS_HOME}/arxiv-papers" && chown "${EXTRAS_USER}:" "${EXTRAS_HOME}/arxiv-papers" || return 1
+  fi
+  json_args="$(printf '%s\n' $args | jq -R . | jq -s -c .)" || return 1
+  jq --arg n "$name" --arg c "${venv}/bin/${command}" --argjson a "$json_args" \
+    '.mcpServers[$n] = {command: $c, args: $a}' "${MCPO_CONFIG_DIR}/config.json" > "${MCPO_CONFIG_DIR}/config.json.new" \
+    && mv -f "${MCPO_CONFIG_DIR}/config.json.new" "${MCPO_CONFIG_DIR}/config.json" || return 1
+  grant_group_read "$EXTRAS_USER" "$MCPO_CONFIG_DIR"
+}
+
+remove_mcp_extra() {
+  local name="$1"
+  if [ -f "${MCPO_CONFIG_DIR}/config.json" ]; then
+    jq --arg n "$name" 'del(.mcpServers[$n])' "${MCPO_CONFIG_DIR}/config.json" > "${MCPO_CONFIG_DIR}/config.json.new" \
+      && mv -f "${MCPO_CONFIG_DIR}/config.json.new" "${MCPO_CONFIG_DIR}/config.json"
+    grant_group_read "$EXTRAS_USER" "$MCPO_CONFIG_DIR" || true
+  fi
+  if [ -d "${MCP_SERVERS_DIR}/${name}" ]; then
+    safe_rm_rf "${MCP_SERVERS_DIR}/${name}" /opt
+  fi
+  if [ "$name" = "arxiv" ] && [ -d "${EXTRAS_HOME}/arxiv-papers" ]; then
+    safe_rm_rf "${EXTRAS_HOME}/arxiv-papers" /var/lib
+  fi
+  rmdir "$MCP_SERVERS_DIR" 2>/dev/null || true
+}
+
+# Restarts mcpo after a config change and offers to refresh the Open WebUI tool servers.
+mcpo_apply_changes() {
+  start_extra_service mcpo "http://127.0.0.1:${MCPO_PORT:-$MCPO_PORT_DEFAULT}/time/openapi.json" || return 1
+  echo "MCP servers now: $(jq -r '.mcpServers | keys | join(", ")' "${MCPO_CONFIG_DIR}/config.json")"
+  offer_openwebui_connect mcpo
+}
+
+manage_mcp_extras() {
+  header
+  load_manifest
+  if [ "${MCPO_INSTALLED:-}" != "1" ]; then
+    warn "Install mcpo first (Open WebUI tools > Install mcpo)."
+    pause
+    return 0
+  fi
+  local entry name package args ans changed=0 list="${MCP_EXTRA_SERVERS:-}"
+  echo "Extra MCP servers (free, open source), each in its own environment:"
+  echo ""
+  for entry in "${MCP_EXTRA_CATALOG[@]}"; do
+    IFS='|' read -r name package _ args <<< "$entry"
+    printf "  %-10s %-20s %s\n" "$name" "$package" "$(mcp_extra_installed "$name" && echo installed || echo "not installed")"
+  done
+  echo ""
+  echo "  wikipedia: search and read Wikipedia articles (Spanish edition)."
+  echo "  arxiv:     search scientific papers on arXiv and read their abstracts."
+  echo ""
+  for entry in "${MCP_EXTRA_CATALOG[@]}"; do
+    IFS='|' read -r name package _ args <<< "$entry"
+    if mcp_extra_installed "$name"; then
+      ans="$(ask "Remove ${name} yes or no" "no")"
+      if is_yes "$ans"; then
+        remove_mcp_extra "$name"
+        # grep -v finds nothing when this was the only server; that is not an error.
+        list="$( { tr ',' '\n' <<< "$list" | grep -vx "$name" || true; } | paste -sd, -)"
+        record_mcp_extras "$list"
+        ok "${name} removed."
+        changed=1
+      fi
+    else
+      ans="$(ask "Add ${name} (${package}) yes or no" "yes")"
+      if is_yes "$ans"; then
+        if add_mcp_extra "$name"; then
+          list="${list:+${list},}${name}"
+          record_mcp_extras "$list"
+          ok "${name} added."
+          changed=1
+        else
+          fail "Could not add ${name}; removing what was installed."
+          remove_mcp_extra "$name"
+        fi
+      fi
+    fi
+  done
+  if [ "$changed" = "1" ]; then
+    mcpo_apply_changes || true
+  fi
+  pause
+}
+
+remove_all_mcp_extras() {
+  local name list="${MCP_EXTRA_SERVERS:-}"
+  for name in ${list//,/ }; do
+    remove_mcp_extra "$name"
+  done
+  if [ -d "$MCP_SERVERS_DIR" ]; then
+    safe_rm_rf "$MCP_SERVERS_DIR" /opt
+  fi
+  remove_manifest_key MCP_EXTRA_SERVERS
+  MCP_EXTRA_SERVERS=""
+}
+
+update_mcp_extras() {
+  local name package list="${MCP_EXTRA_SERVERS:-}"
+  for name in ${list//,/ }; do
+    package="$(mcp_catalog_field "$name" 2)" || continue
+    run_required "Updating MCP server ${name}..." "${MCP_SERVERS_DIR}/${name}/venv/bin/pip" install --no-cache-dir -U "$package" || return 1
+  done
+  if [ -d "$MCP_SERVERS_DIR" ]; then
+    grant_group_read "$EXTRAS_USER" "$MCP_SERVERS_DIR"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -514,23 +692,20 @@ install_searxng() {
   run_extra_install "SearXNG" searxng_install_steps remove_searxng "$port" searxng
 }
 
-searxng_install_steps() {
-  local port="$1"
-  local commit secret
-  ensure_python311_ready || return 1
-  ensure_extras_identity "$EXTRAS_USER" "$EXTRAS_HOME" /sbin/nologin EXTRAS_USER_CREATED || return 1
-  record_manifest "SEARXNG_INSTALLED" "1" || return 1
-  SEARXNG_INSTALLED=1
-  install_tracked_package git searxng || return 1
-
-  mkdir -p "$SEARXNG_DIR" || return 1
-  run_required "Downloading SearXNG source..." git clone --depth 1 "$SEARXNG_REPO" "${SEARXNG_DIR}/src" || return 1
-  commit="$(git -C "${SEARXNG_DIR}/src" rev-parse HEAD)" || return 1
-  searxng_install_python_env || return 1
-
-  secret="$(new_extras_secret)" || return 1
+# SearXNG settings. The engines enabled by default (DuckDuckGo, Brave, Google CSE) often answer
+# with CAPTCHAs or "too many requests" and get suspended, leaving no results; Bing and Yahoo
+# kept answering in tests, so they are enabled too. An existing secret key is kept.
+write_searxng_settings() {
+  local file="${SEARXNG_CONFIG_DIR}/settings.yml"
+  local secret=""
+  if [ -f "$file" ]; then
+    secret="$(sed -n 's/^  secret_key: "\(.*\)"$/\1/p' "$file" | head -n 1)"
+  fi
+  if [ -z "$secret" ]; then
+    secret="$(new_extras_secret)" || return 1
+  fi
   mkdir -p "$SEARXNG_CONFIG_DIR" || return 1
-  cat > "${SEARXNG_CONFIG_DIR}/settings.yml" <<EOF || return 1
+  cat > "${file}.new" <<EOF || return 1
 use_default_settings: true
 general:
   instance_name: "Xemi SearXNG"
@@ -542,8 +717,31 @@ search:
   formats:
     - html
     - json
+engines:
+  - name: bing
+    disabled: false
+  - name: yahoo
+    disabled: false
 EOF
-  grant_group_read "$EXTRAS_USER" "$SEARXNG_CONFIG_DIR" || return 1
+  mv -f "${file}.new" "$file" || return 1
+  grant_group_read "$EXTRAS_USER" "$SEARXNG_CONFIG_DIR"
+}
+
+searxng_install_steps() {
+  local port="$1"
+  local commit
+  ensure_python311_ready || return 1
+  ensure_extras_identity "$EXTRAS_USER" "$EXTRAS_HOME" /sbin/nologin EXTRAS_USER_CREATED || return 1
+  record_manifest "SEARXNG_INSTALLED" "1" || return 1
+  SEARXNG_INSTALLED=1
+  install_tracked_package git searxng || return 1
+
+  mkdir -p "$SEARXNG_DIR" || return 1
+  run_required "Downloading SearXNG source..." git clone --depth 1 "$SEARXNG_REPO" "${SEARXNG_DIR}/src" || return 1
+  commit="$(git -C "${SEARXNG_DIR}/src" rev-parse HEAD)" || return 1
+  searxng_install_python_env || return 1
+
+  write_searxng_settings || return 1
 
   write_extra_service searxng "SearXNG for Open WebUI" "$EXTRAS_USER" \
     "${SEARXNG_DIR}/src" "$EXTRAS_HOME" \
@@ -687,13 +885,11 @@ tika_install_steps() {
     return 1
   fi
   mv -f "$tmp" "$jar" || return 1
+  install_tracked_package "$TIKA_OCR_PACKAGES" tika-ocr || return 1
+  write_tika_config || return 1
   grant_group_read "$EXTRAS_USER" "$TIKA_DIR" || return 1
 
-  # Tika forks a child JVM found through PATH, so the runtime must be first in PATH.
-  write_extra_service tika "Apache Tika server for Open WebUI" "$EXTRAS_USER" \
-    "$EXTRAS_HOME" "$EXTRAS_HOME" \
-    "${java_home}/bin/java -jar ${jar} --host 127.0.0.1 --port ${port}" \
-    "Environment=PATH=${java_home}/bin:/usr/bin:/bin" || return 1
+  write_tika_service "$port" "$java_home" || return 1
   record_manifest "TIKA_PORT" "$port" || return 1
   record_manifest "TIKA_INSTALLED_VERSION" "$TIKA_VERSION" || return 1
   TIKA_PORT="$port"
@@ -702,6 +898,49 @@ tika_install_steps() {
   ok "Apache Tika ready on 127.0.0.1:${port}."
   echo ""
   show_tika_connection
+}
+
+# OCR for scanned PDFs and images: Tika calls Tesseract when it is in PATH. Only the language
+# needs setting; Tika 3 already OCRs PDF pages that have no text layer.
+write_tika_config() {
+  cat > "${TIKA_DIR}/tika-config.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Written by xemi_ai_install.sh: OCR languages for scanned PDFs and images. -->
+<properties>
+  <parsers>
+    <parser class="org.apache.tika.parser.DefaultParser">
+      <parser-exclude class="org.apache.tika.parser.ocr.TesseractOCRParser"/>
+    </parser>
+    <parser class="org.apache.tika.parser.ocr.TesseractOCRParser">
+      <params>
+        <param name="language" type="string">${TIKA_OCR_LANGUAGES}</param>
+      </params>
+    </parser>
+  </parsers>
+</properties>
+EOF
+}
+
+# Tika forks a child JVM found through PATH, so the runtime must be first in PATH;
+# /usr/bin must follow it so Tika finds tesseract for OCR.
+write_tika_service() {
+  local port="$1"
+  local java_home="$2"
+  write_extra_service tika "Apache Tika server for Open WebUI" "$EXTRAS_USER" \
+    "$EXTRAS_HOME" "$EXTRAS_HOME" \
+    "${java_home}/bin/java -jar ${TIKA_DIR}/tika-server-standard-${TIKA_INSTALLED_VERSION:-$TIKA_VERSION}.jar --host 127.0.0.1 --port ${port} --config ${TIKA_DIR}/tika-config.xml" \
+    "Environment=PATH=${java_home}/bin:/usr/bin:/bin"
+}
+
+# Brings an existing Tika install up to date: OCR packages, OCR config, unit and hardening.
+refresh_tika() {
+  local java_home
+  java_home="$(tika_java_home)" || { fail "Java 21 runtime not found under /usr/lib/jvm."; return 1; }
+  install_tracked_package "$TIKA_OCR_PACKAGES" tika-ocr || return 1
+  write_tika_config || return 1
+  grant_group_read "$EXTRAS_USER" "$TIKA_DIR" || return 1
+  write_tika_service "${TIKA_PORT:-$TIKA_PORT_DEFAULT}" "$java_home" || return 1
+  start_extra_service tika "http://127.0.0.1:${TIKA_PORT:-$TIKA_PORT_DEFAULT}/version"
 }
 
 show_tika_connection() {
@@ -719,6 +958,7 @@ remove_tika() {
   remove_manifest_key TIKA_INSTALLED
   remove_manifest_key TIKA_PORT
   remove_manifest_key TIKA_INSTALLED_VERSION
+  remove_tracked_packages tika-ocr
   remove_tracked_packages tika
   TIKA_INSTALLED=""
   ok "Apache Tika removed."
@@ -735,6 +975,9 @@ openwebui_extras_table() {
   echo "mcpo|mcpo|http://127.0.0.1:${MCPO_PORT:-$MCPO_PORT_DEFAULT}/time/openapi.json|MCPO_INSTALLED"
   echo "searxng|SearXNG|http://127.0.0.1:${SEARXNG_PORT:-$SEARXNG_PORT_DEFAULT}/healthz|SEARXNG_INSTALLED"
   echo "tika|Apache Tika|http://127.0.0.1:${TIKA_PORT:-$TIKA_PORT_DEFAULT}/version|TIKA_INSTALLED"
+  echo "piper-tts|Piper TTS|http://127.0.0.1:${PIPER_PORT:-$PIPER_PORT_DEFAULT}/health|PIPER_INSTALLED"
+  echo "jupyter|Jupyter|http://127.0.0.1:${JUPYTER_PORT:-$JUPYTER_PORT_DEFAULT}/api|JUPYTER_INSTALLED"
+  echo "playwright|Chromium loader|http://127.0.0.1:${PLAYWRIGHT_PORT:-$PLAYWRIGHT_PORT_DEFAULT}/|PLAYWRIGHT_INSTALLED"
 }
 
 show_openwebui_extras_status() {
@@ -762,6 +1005,10 @@ show_openwebui_extras_status() {
     [ "${MCPO_INSTALLED:-}" = "1" ] && { show_mcpo_connection; echo ""; }
     [ "${SEARXNG_INSTALLED:-}" = "1" ] && { show_searxng_connection; echo ""; }
     [ "${TIKA_INSTALLED:-}" = "1" ] && { show_tika_connection; echo ""; }
+    [ "${PIPER_INSTALLED:-}" = "1" ] && { show_piper_connection; echo ""; }
+    [ "${JUPYTER_INSTALLED:-}" = "1" ] && { show_jupyter_connection; echo ""; }
+    [ "${PLAYWRIGHT_INSTALLED:-}" = "1" ] && { show_playwright_connection; echo ""; }
+    [ -n "${MCP_EXTRA_SERVERS:-}" ] && { echo "Extra MCP servers in mcpo: ${MCP_EXTRA_SERVERS}"; echo ""; }
   fi
   pause
 }
@@ -786,6 +1033,7 @@ update_openwebui_extras() {
   if [ "${MCPO_INSTALLED:-}" = "1" ]; then
     if run_required "Updating mcpo and MCP servers..." "$MCPO_VENV/bin/pip" install --no-cache-dir -U mcpo mcp-server-time mcp-server-fetch \
       && grant_group_read "$EXTRAS_USER" "$MCPO_VENV" \
+      && update_mcp_extras \
       && write_extra_hardening mcpo \
       && start_extra_service mcpo "http://127.0.0.1:${MCPO_PORT:-$MCPO_PORT_DEFAULT}/time/openapi.json"; then
       ok "mcpo updated."
@@ -797,17 +1045,40 @@ update_openwebui_extras() {
 
   if [ "${SEARXNG_INSTALLED:-}" = "1" ]; then
     write_extra_hardening searxng || warn "Could not write SearXNG hardening drop-in."
+    write_searxng_settings || warn "Could not refresh the SearXNG settings."
     update_searxng || true
     updated=1
   fi
 
   if [ "${TIKA_INSTALLED:-}" = "1" ]; then
-    if write_extra_hardening tika && start_extra_service tika "http://127.0.0.1:${TIKA_PORT:-$TIKA_PORT_DEFAULT}/version"; then
-      ok "Apache Tika service settings refreshed."
+    echo "Refreshing Apache Tika (adds OCR for scanned PDFs if missing: ${TIKA_OCR_PACKAGES})..."
+    if refresh_tika; then
+      ok "Apache Tika service settings refreshed (OCR languages: ${TIKA_OCR_LANGUAGES})."
     else
       warn "Apache Tika could not be restarted with the refreshed settings."
     fi
     warn "Apache Tika is pinned to ${TIKA_INSTALLED_VERSION:-$TIKA_VERSION} with a verified checksum; it changes only with installer updates."
+    updated=1
+  fi
+
+  if [ "${PIPER_INSTALLED:-}" = "1" ]; then
+    if update_piper_tts; then ok "Piper text to speech updated."; else warn "Piper update failed."; fi
+    updated=1
+  fi
+
+  if [ "${JUPYTER_INSTALLED:-}" = "1" ]; then
+    if update_jupyter; then ok "Jupyter updated."; else warn "Jupyter update failed."; fi
+    updated=1
+  fi
+
+  if [ "${PLAYWRIGHT_INSTALLED:-}" = "1" ]; then
+    # Playwright follows the version Open WebUI declares, not the newest one.
+    if sync_playwright_with_openwebui; then ok "Chromium web loader in sync with Open WebUI (Playwright ${PLAYWRIGHT_VERSION:-?})."; else warn "Chromium web loader update failed."; fi
+    updated=1
+  fi
+
+  if [ "${HTTPS_INSTALLED:-}" = "1" ]; then
+    if refresh_https; then ok "HTTPS front end configuration refreshed."; else warn "HTTPS front end refresh failed."; fi
     updated=1
   fi
 
@@ -843,6 +1114,9 @@ remove_openwebui_extras_interactive() {
         mcpo) remove_mcpo ;;
         searxng) remove_searxng ;;
         tika) remove_tika ;;
+        piper-tts) remove_piper_tts ;;
+        jupyter) remove_jupyter ;;
+        playwright) remove_browser ;;
       esac
     done
   fi
@@ -875,6 +1149,9 @@ remove_openwebui_extras() {
   remove_mcpo
   remove_searxng
   remove_tika
+  remove_piper_tts
+  remove_jupyter
+  remove_browser
   remove_unused_extras_identities "$purge"
 }
 
@@ -889,6 +1166,20 @@ doctor_check_openwebui_extras() {
       doctor_ok "${service} runs with the hardening drop-in"
     else
       doctor_warn "${service} runs without the hardening drop-in; run: tools-update"
+    fi
+    if [ "$service" = "tika" ]; then
+      if cmd_exists tesseract && [ -f "${TIKA_DIR}/tika-config.xml" ]; then
+        doctor_ok "Apache Tika OCR enabled (${TIKA_OCR_LANGUAGES}): scanned PDFs are readable"
+      else
+        doctor_warn "Apache Tika has no OCR: scanned PDFs yield no text; run: tools-update"
+      fi
+    fi
+    if [ "$service" = "playwright" ]; then
+      if cmd_exists fc-list && [ -n "$(fc-list 2>/dev/null)" ]; then
+        doctor_ok "Chromium has fonts (fontconfig): pages with web fonts render"
+      else
+        doctor_warn "Chromium has no fontconfig setup: it crashes on pages with web fonts; run: tools-update"
+      fi
     fi
   done < <(openwebui_extras_table)
   if [ "$any" = "1" ]; then

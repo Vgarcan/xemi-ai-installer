@@ -12,6 +12,12 @@ managed_services_table() {
     while IFS='|' read -r unit label url flag; do
       echo "${unit}|${label}|${url}"
     done < <(openwebui_extras_table)
+    if [ "${HTTPS_INSTALLED:-}" = "1" ]; then
+      echo "${HTTPS_SERVICE}|HTTPS front end|https://127.0.0.1:${HTTPS_PORT:-$HTTPS_PORT_DEFAULT}/health"
+    fi
+    if [ "${OWUI_BACKUP_ENABLED:-}" = "1" ]; then
+      echo "${OWUI_BACKUP_SERVICE}.timer|Open WebUI backups|"
+    fi
     echo "nvidia-persistenced|NVIDIA persistence|"
     echo "firewalld|Firewall|"
   } | while IFS='|' read -r unit label url; do
@@ -80,7 +86,7 @@ show_services_status() {
 
   echo "Services managed or used by the installer:"
   echo ""
-  printf "%-22s %-12s %-9s %-7s %-7s %-4s %-6s %-6s %-16s %s\n" \
+  printf "%-28s %-12s %-9s %-7s %-7s %-4s %-6s %-6s %-16s %s\n" \
     SERVICE STATE BOOT PID MEMORY RST ERR24H HEALTH SINCE LISTEN
   while IFS='|' read -r unit label url; do
     prop=()
@@ -103,7 +109,8 @@ show_services_status() {
     errors="$({ journalctl -u "$unit" -p err --since "24 hours ago" -q --no-pager 2>/dev/null || true; } | wc -l)"
     if [ -z "$url" ]; then
       health="-"
-    elif curl -fsS --max-time 5 "$url" >/dev/null 2>&1; then
+    # -k: local health checks only; the HTTPS front end uses a private certificate authority.
+    elif curl -fsSk --max-time 5 "$url" >/dev/null 2>&1; then
       health="ok"
     else
       health="FAIL"
@@ -121,7 +128,7 @@ show_services_status() {
     elif { [ "${prop[ActiveState]:-}" != "active" ] && [ "$state" != "done" ]; } || [ "$restarts" != "0" ] || [ "$errors" != "0" ]; then
       color="$YELLOW"
     fi
-    printf "${color}%-22s %-12s %-9s %-7s %-7s %-4s %-6s %-6s %-16s %s${color:+$NC}\n" \
+    printf "${color}%-28s %-12s %-9s %-7s %-7s %-4s %-6s %-6s %-16s %s${color:+$NC}\n" \
       "$unit" "$state" "$boot" "$pid" "$mem" "$restarts" "$errors" "$health" "$since" "${ports:--}"
   done < <(managed_services_table)
 
@@ -290,7 +297,7 @@ restart_ai_services() {
   for row in "${rows[@]}"; do
     IFS='|' read -r unit label url <<< "$row"
     case "$unit" in
-      firewalld|nvidia-persistenced|xemi-ollama-gpu-guard) continue ;;
+      firewalld|nvidia-persistenced|xemi-ollama-gpu-guard|*.timer) continue ;;
     esac
     if ! systemctl restart "$unit"; then
       fail "${label}: restart failed. Check: journalctl -u ${unit} -e"
