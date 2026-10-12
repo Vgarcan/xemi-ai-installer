@@ -742,7 +742,7 @@ How to use the tools in Open WebUI, with diagrams, for users and administrators 
 
 | Tool | Command | Port | What it adds | Service user |
 |---|---|---|---|---|
-| Open Terminal | `open-terminal` | 8000 | Shell, file browser and code execution for models | `aiterminal` |
+| Open Terminal | `open-terminal` | 8000 | Shell, file browser and code execution for models; creates Word, Excel, PowerPoint and PDF files (`python-docx`, `openpyxl`, `python-pptx`, `reportlab`) and shows them in the chat | `aiterminal` |
 | mcpo | `mcpo` | 8001 | MCP servers `time` and `fetch` as OpenAPI tool servers | `aitools` |
 | SearXNG | `searxng` | 8888 | Private web search without paid APIs | `aitools` |
 | Apache Tika | `tika` | 9998 | PDF/Word/Excel text extraction for documents and RAG, with OCR (Tesseract, Spanish + English) for scanned PDFs and images | `aitools` |
@@ -784,6 +784,8 @@ Security notes:
 
 - Every tool service runs with an extra sandbox drop-in (`/etc/systemd/system/<tool>.service.d/xemi-hardening.conf`): no capabilities, private `/dev`, system-call filter, restricted namespaces and address families. Verified with all four tools; `systemd-analyze security` drops from 7.4 (MEDIUM) to 1.5 (OK). `Update installed tools` applies it to existing installs.
 
+- Open Terminal's venv comes first on the service `PATH`, so `python3` in the terminal is Python 3.11 with the Office libraries. The venv belongs to root, so models cannot change it with `pip`. `tools-update` adds the libraries and the `PATH` to existing installs.
+- Open WebUI's built-in per-user memory (Settings > Personalization > Memory) is used instead of a memory MCP server: through mcpo every user would share one memory.
 - Open Terminal lets connected models run commands as `aiterminal`. That user has no sudo, sees the system read-only, can write only to `/var/lib/open-terminal`, cannot see `/home` or other users' processes. It can still read world-readable files and reach the network.
 - mcpo accepts its API key only as a command-line argument. The tool services run with `ProtectProc=invisible`, so the Open Terminal user cannot see other users' processes or that key; other local login users can still see it in the process list.
 - SearXNG uses Bing and Yahoo besides its defaults: from a single server IP, DuckDuckGo, Brave and Google soon answer with CAPTCHAs or rate limits and return nothing. The installer writes `/etc/searxng/settings.yml` (keeping its secret key) on install and on `tools-update`.

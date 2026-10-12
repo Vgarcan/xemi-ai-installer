@@ -13,7 +13,8 @@ Esta guía explica cómo usar en el chat las herramientas que el instalador aña
 | **time** (mcpo) | Hora actual y conversiones entre zonas horarias | Herramientas |
 | **fetch** (mcpo) | Leer y resumir una página web concreta | Herramientas |
 | **wikipedia** y **arxiv** (mcpo) | Consultar la Wikipedia en español y buscar artículos científicos | Herramientas |
-| **Terminal** (Open Terminal) | Ejecutar comandos, analizar datos, crear y modificar archivos | Integraciones › Terminal |
+| **Terminal** (Open Terminal) | Ejecutar comandos, analizar datos, crear archivos de Word, Excel, PowerPoint y PDF | Integraciones › Terminal |
+| **Memoria** (incluida en Open WebUI) | Que el modelo recuerde datos tuyos entre chats | Ajustes › Personalización › Memoria |
 | **Interprete de Código** (Jupyter) | Que el modelo calcule con Python y dibuje gráficos dentro del chat | Integraciones › Interprete de Código |
 | **Voz** (Whisper y Piper) | Dictar en vez de escribir y escuchar las respuestas | Botones Dictar y Modo de Voz; altavoz en cada respuesta |
 
@@ -119,6 +120,13 @@ Ejemplos:
 - «Sube ventas.csv (adjunto). Calcula el total por mes con Python y guarda el resultado en resumen.csv.»
 - «Convierte informe.md a HTML y dime cuántas palabras tiene.»
 - «Crea un gráfico de barras con los datos de resumen.csv y guárdalo como grafico.png.»
+- «Hazme un Excel con estos gastos (luz 60, agua 25, internet 30) y una fila de total con fórmula. Muéstramelo.»
+- «Redacta una carta de reclamación en Word con este texto y muéstramela.»
+- «Haz una presentación de 3 diapositivas sobre este resumen» o «…guárdalo como PDF».
+
+El terminal crea archivos de **Word, Excel, PowerPoint y PDF**. Si le pides que te lo **muestre**, el archivo aparece en el chat con vista previa y botón de descarga.
+
+> **Fórmulas de Excel:** dentro del archivo las fórmulas se guardan siempre en inglés (`SUM`, `IF`, `VLOOKUP`), aunque Excel las muestre en español. Si el modelo escribe `=SUMA(…)`, la celda saldrá con error al abrirla. Pídeselo así: «usa las fórmulas en inglés, como SUM».
 
 Con **Mostrar Archivos** ves y descargas los archivos del espacio de trabajo.
 
@@ -137,7 +145,15 @@ Qué puede hacer y qué no:
 - **No escribas contraseñas ni claves** en el chat ni en archivos del terminal.
 - **Revisa lo que hace el modelo** antes de usar sus resultados, sobre todo si modifica o borra archivos.
 
-## 5. Cálculos y gráficos (Interprete de Código)
+## 5. Memoria: que el modelo te recuerde
+
+Open WebUI puede recordar datos tuyos entre chats («trabajo en contabilidad», «escríbeme siempre de tú»). Cada usuario tiene su propia memoria; nadie más la ve.
+
+- Dile «recuerda que…» y el modelo lo guarda. En chats nuevos lo tendrá en cuenta.
+- Revisa, edita o borra lo guardado en **Ajustes › Personalización › Memoria**.
+- Funciona mejor con modelos de la familia qwen3.5 y la llamada a funciones en modo Nativo.
+
+## 6. Cálculos y gráficos (Interprete de Código)
 
 Si el administrador instaló Jupyter, el **Interprete de Código** ejecuta Python en el servidor, con pandas, numpy y matplotlib, y los gráficos aparecen dentro de la respuesta.
 
@@ -155,7 +171,7 @@ Ten en cuenta:
 - El código se ejecuta en el servidor con los mismos límites que el terminal (sin `sudo`, solo en su carpeta). La carpeta de trabajo es **compartida**: no dejes datos confidenciales.
 - Revisa el código y el resultado: el modelo puede equivocarse al programar.
 
-## 6. Voz: dictar y escuchar
+## 7. Voz: dictar y escuchar
 
 - **Dictar**: pulsa **Dictar** en la barra de escritura y habla; el texto aparece en el mensaje. **Modo de Voz** abre una conversación hablada. La transcripción se hace en el servidor (Whisper), sin enviar el audio fuera.
 - **Escuchar**: en cada respuesta, el botón de altavoz la lee en voz alta (Piper, voces en español). Puedes elegir otra voz en Ajustes › Audio.

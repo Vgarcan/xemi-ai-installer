@@ -124,6 +124,9 @@ open_terminal_user_files() {
     ! -path "${OPEN_TERMINAL_HOME}/.bash_profile" \
     ! -path "${OPEN_TERMINAL_HOME}/.bashrc" \
     ! -path "${OPEN_TERMINAL_HOME}/.bash_history" \
+    ! -path "${OPEN_TERMINAL_HOME}/.python_history" \
+    ! -path "${OPEN_TERMINAL_HOME}/.wget-hsts" \
+    ! -path "${OPEN_TERMINAL_HOME}/.lesshst" \
     ! -path "${OPEN_TERMINAL_HOME}/.local/state/open-terminal/*" \
     ! -path "${OPEN_TERMINAL_HOME}/.cache/*" \
     -print
@@ -384,6 +387,17 @@ install_open_terminal() {
   run_extra_install "Open Terminal" open_terminal_install_steps remove_open_terminal "$port" open-terminal
 }
 
+# The venv comes first on PATH so the model's "python3" has the Office libraries; the venv
+# is read-only for aiterminal, so the model cannot change it with pip.
+write_open_terminal_service() {
+  local port="$1"
+  write_extra_service open-terminal "Open Terminal for Open WebUI" "$TERMINAL_USER" \
+    "$OPEN_TERMINAL_HOME" "$OPEN_TERMINAL_HOME" \
+    "${OPEN_TERMINAL_VENV}/bin/open-terminal run --host 127.0.0.1 --port ${port} --cwd ${OPEN_TERMINAL_HOME}" \
+    "EnvironmentFile=${OPEN_TERMINAL_ENV_FILE}" \
+    "Environment=PATH=${OPEN_TERMINAL_VENV}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+}
+
 open_terminal_install_steps() {
   local port="$1"
   local key
@@ -391,15 +405,13 @@ open_terminal_install_steps() {
   ensure_extras_identity "$TERMINAL_USER" "$OPEN_TERMINAL_HOME" /bin/bash TERMINAL_USER_CREATED || return 1
   record_manifest "OPEN_TERMINAL_INSTALLED" "1" || return 1
   OPEN_TERMINAL_INSTALLED=1
-  create_extras_venv "$OPEN_TERMINAL_VENV" "$TERMINAL_USER" open-terminal || return 1
+  # shellcheck disable=SC2086
+  create_extras_venv "$OPEN_TERMINAL_VENV" "$TERMINAL_USER" open-terminal $OPEN_TERMINAL_OFFICE_PACKAGES || return 1
 
   key="$(new_extras_secret)" || return 1
   (umask 077; printf 'OPEN_TERMINAL_API_KEY=%s\n' "$key" > "$OPEN_TERMINAL_ENV_FILE") || return 1
 
-  write_extra_service open-terminal "Open Terminal for Open WebUI" "$TERMINAL_USER" \
-    "$OPEN_TERMINAL_HOME" "$OPEN_TERMINAL_HOME" \
-    "${OPEN_TERMINAL_VENV}/bin/open-terminal run --host 127.0.0.1 --port ${port} --cwd ${OPEN_TERMINAL_HOME}" \
-    "EnvironmentFile=${OPEN_TERMINAL_ENV_FILE}" || return 1
+  write_open_terminal_service "$port" || return 1
   record_manifest "OPEN_TERMINAL_PORT" "$port" || return 1
   OPEN_TERMINAL_PORT="$port"
 
@@ -1019,8 +1031,10 @@ update_openwebui_extras() {
   local updated=0
 
   if [ "${OPEN_TERMINAL_INSTALLED:-}" = "1" ]; then
-    if run_required "Updating Open Terminal..." "$OPEN_TERMINAL_VENV/bin/pip" install --no-cache-dir -U open-terminal \
+    # shellcheck disable=SC2086
+    if run_required "Updating Open Terminal..." "$OPEN_TERMINAL_VENV/bin/pip" install --no-cache-dir -U open-terminal $OPEN_TERMINAL_OFFICE_PACKAGES \
       && grant_group_read "$TERMINAL_USER" "$OPEN_TERMINAL_VENV" \
+      && write_open_terminal_service "${OPEN_TERMINAL_PORT:-$OPEN_TERMINAL_PORT_DEFAULT}" \
       && write_extra_hardening open-terminal \
       && start_extra_service open-terminal "http://127.0.0.1:${OPEN_TERMINAL_PORT:-$OPEN_TERMINAL_PORT_DEFAULT}/health"; then
       ok "Open Terminal updated."
