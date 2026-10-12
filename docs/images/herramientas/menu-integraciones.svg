@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="340" viewBox="0 0 760 340" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif">
+  <title>Esquema del menú Integraciones con Búsqueda Web y Terminal</title>
+  <style>
+    .card { fill: #ffffff; stroke: #d0d5dd; }
+    .title { font-size: 14px; font-weight: 600; fill: #1f2937; }
+    .note { font-size: 12px; fill: #6b7280; }
+    .sec { font-size: 12px; fill: #6b7280; font-weight: 600; }
+    .item { font-size: 14px; fill: #374151; }
+    .on { fill: #2563eb; }
+    .off { fill: #d1d5db; }
+    .knob { fill: #ffffff; }
+    .hl { fill: #eff6ff; stroke: #2563eb; }
+    .radio { fill: #ffffff; stroke: #2563eb; stroke-width: 2; }
+    .dot { fill: #2563eb; }
+    .num { fill: #2563eb; }
+    .numt { font-size: 12px; fill: #ffffff; font-weight: 700; }
+    .leg { font-size: 13px; fill: #1f2937; }
+    .legb { font-size: 13px; fill: #1f2937; font-weight: 600; }
+    .lead { stroke: #2563eb; stroke-width: 1.5; fill: none; }
+    .sep { stroke: #e5e7eb; }
+  </style>
+  <rect x="0.5" y="0.5" width="759" height="339" rx="12" fill="#f8f9fb" stroke="#e5e7eb"/>
+  <text x="24" y="32" class="title">Menú Integraciones: búsqueda web y terminal</text>
+  <text x="736" y="32" class="note" text-anchor="end">Esquema · textos de Open WebUI 0.11.3</text>
+
+  <rect x="24" y="52" width="330" height="250" rx="12" class="card"/>
+  <rect x="32" y="62" width="314" height="36" rx="8" class="hl"/>
+  <text x="48" y="85" class="item">Búsqueda Web</text>
+  <rect x="290" y="69" width="40" height="22" rx="11" class="on"/><circle cx="319" cy="80" r="8" class="knob"/>
+  <text x="48" y="125" class="item">Imagen</text>
+  <rect x="290" y="109" width="40" height="22" rx="11" class="off"/><circle cx="301" cy="120" r="8" class="knob"/>
+  <text x="48" y="163" class="item">Interprete de Código</text>
+  <rect x="290" y="147" width="40" height="22" rx="11" class="off"/><circle cx="301" cy="158" r="8" class="knob"/>
+  <line x1="40" y1="186" x2="338" y2="186" class="sep"/>
+  <text x="48" y="210" class="sec">Terminal</text>
+  <rect x="32" y="222" width="314" height="36" rx="8" class="hl"/>
+  <circle cx="54" cy="240" r="7" class="radio"/><circle cx="54" cy="240" r="3.5" class="dot"/>
+  <text x="70" y="245" class="item">Open Terminal (this server)</text>
+  <text x="48" y="286" class="note">Añadir Terminal (solo administradores)</text>
+
+  <circle cx="380" cy="80" r="10" class="num"/><text x="380" y="84" class="numt" text-anchor="middle">1</text>
+  <path d="M370 80 H350" class="lead"/>
+  <text x="400" y="76" class="legb">Búsqueda Web (SearXNG)</text>
+  <text x="400" y="96" class="leg">Actívala para preguntas sobre datos actuales.</text>
+  <text x="400" y="114" class="leg">La respuesta muestra las fuentes como citas.</text>
+
+  <circle cx="380" cy="240" r="10" class="num"/><text x="380" y="244" class="numt" text-anchor="middle">2</text>
+  <path d="M370 240 H350" class="lead"/>
+  <text x="400" y="230" class="legb">Terminal (Open Terminal)</text>
+  <text x="400" y="250" class="leg">Elige el terminal para que el modelo pueda ejecutar</text>
+  <text x="400" y="268" class="leg">comandos y crear o leer archivos en el servidor.</text>
+</svg>

@@ -141,6 +141,8 @@ repair_ollama_service_override() {
   record_manifest "OLLAMA_OVERRIDE_CREATED" "1"
   record_manifest "OLLAMA_PORT" "$port"
   record_manifest "OLLAMA_BIND_HOST" "$bind_host"
+  record_manifest "OLLAMA_CONTEXT_LENGTH" "$OLLAMA_CONTEXT_LENGTH"
+  record_manifest "OLLAMA_KV_CACHE_TYPE" "$OLLAMA_KV_CACHE_TYPE"
   systemctl daemon-reload
   systemctl enable ollama >/dev/null 2>&1 || true
   systemctl enable xemi-ollama-gpu-guard.service >/dev/null 2>&1 || true
@@ -157,6 +159,7 @@ repair_ollama_installation() {
   if ! cmd_exists ollama; then
     warn "Ollama binary missing; installing Ollama."
     install_ollama_official
+    repair_ollama_service_override
     return
   fi
 
@@ -165,6 +168,7 @@ repair_ollama_installation() {
   else
     warn "Ollama runtime or CUDA libraries appear incomplete. Re-installing Ollama."
     install_ollama_official
+    repair_ollama_service_override
     return
   fi
 
@@ -178,8 +182,26 @@ repair_ollama_installation() {
   pause
 }
 
+ollama_lib_dir_for_binary() {
+  case "$1" in
+    /usr/local/bin/ollama) echo /usr/local/lib/ollama ;;
+    /usr/bin/ollama|/bin/ollama) echo /usr/lib/ollama ;;
+    *) return 1 ;;
+  esac
+}
+
+ollama_runtime_lib_dir() {
+  local binary
+  binary="$(command -v ollama || true)"
+  ollama_lib_dir_for_binary "$binary"
+}
+
 verify_ollama_runtime_libs() {
-  local ollama_lib_dir="/usr/local/lib/ollama"
+  local ollama_lib_dir
+  ollama_lib_dir="$(ollama_runtime_lib_dir)" || {
+    fail "Cannot determine Ollama runtime library directory from the installed binary."
+    return 1
+  }
   local llm_library=""
   if [ ! -e "${ollama_lib_dir}/libggml-base.so.0" ] && [ ! -e "${ollama_lib_dir}/libggml-base.so.0.0.0" ]; then
     fail "Ollama runtime libraries are incomplete: missing ${ollama_lib_dir}/libggml-base.so.0. Re-run the Ollama installer."
@@ -300,14 +322,17 @@ choose_ollama_binary() {
     return 0
   fi
 
-  echo ""
-  echo "Multiple Ollama binaries detected:"
-  local i=1
-  for b in "${bins[@]}"; do
-    echo "$i) $b"
-    i=$((i+1))
-  done
-  echo ""
+  # The list goes to stderr: callers capture stdout, which must hold only the chosen path.
+  {
+    echo ""
+    echo "Multiple Ollama binaries detected:"
+    local i=1
+    for b in "${bins[@]}"; do
+      echo "$i) $b"
+      i=$((i+1))
+    done
+    echo ""
+  } >&2
   local choice
   choice="$(ask "Select the Ollama binary number" "1")"
   if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
@@ -358,9 +383,10 @@ show_ollama_status_and_location() {
 
 install_ollama_official() {
   header
-  local installer binary_before binary_after service_before
+  local installer binary_before binary_after service_before ollama_user_before
   binary_before="$(command -v ollama || true)"
   service_before="$(systemctl show ollama.service -p LoadState --value --no-pager 2>/dev/null || true)"
+  ollama_user_before="$(getent passwd ollama || true)"
   installer="$(mktemp /tmp/ollama-install.XXXXXX.sh)"
   echo "Installing Ollama using official installer..."
   if ! run_required "Downloading Ollama official installer..." curl -fsSL -o "$installer" https://ollama.com/install.sh; then
@@ -398,7 +424,10 @@ install_ollama_official() {
   fi
   rm -f "$installer"
 
-  verify_ollama_runtime_libs
+  # Record ownership before verifying, so purge can clean up even if verification fails.
+  if [ -z "$ollama_user_before" ] && getent passwd ollama >/dev/null 2>&1; then
+    record_manifest "OLLAMA_USER_CREATED_BY_XEMI" "1"
+  fi
   binary_after="$(command -v ollama || true)"
   if [ -z "$binary_before" ] && [ "$service_before" != "loaded" ] && [ -n "$binary_after" ]; then
     record_manifest "OLLAMA_INSTALLED_BY_XEMI" "1"
@@ -406,6 +435,7 @@ install_ollama_official() {
   elif [ -n "$binary_before" ] || [ "$service_before" = "loaded" ]; then
     warn "Ollama components existed before installation; purge will preserve its binary and data."
   fi
+  verify_ollama_runtime_libs || { pause; return 1; }
   ok "Ollama installed."
   pause
 }
@@ -429,7 +459,8 @@ current_ollama_models_dir() {
 }
 
 detect_ollama_llm_library() {
-  local ollama_lib_dir="/usr/local/lib/ollama"
+  local ollama_lib_dir
+  ollama_lib_dir="$(ollama_runtime_lib_dir)" || return 1
   local cuda_major=""
 
   if cmd_exists nvidia-smi && nvidia-smi >/dev/null 2>&1; then
@@ -453,18 +484,24 @@ write_ollama_override() {
   local gpu_uuids="$3"
   local models_dir="${4:-}"
 
-  local llm_library
-  local llm_library_path="/usr/local/lib/ollama"
+  local llm_library ollama_lib_dir llm_library_path
+  ollama_lib_dir="$(ollama_runtime_lib_dir)" || {
+    fail "Cannot determine Ollama runtime library directory."
+    return 1
+  }
+  llm_library_path="$ollama_lib_dir"
 
   validate_port "$port" || { fail "Invalid Ollama port: $port"; return 1; }
   validate_bind_host "$bind_host" || { fail "Invalid Ollama bind host: $bind_host"; return 1; }
+  validate_context_length "$OLLAMA_CONTEXT_LENGTH" || { fail "Invalid Ollama context length: $OLLAMA_CONTEXT_LENGTH"; return 1; }
+  validate_kv_cache_type "$OLLAMA_KV_CACHE_TYPE" || { fail "Invalid Ollama K/V cache type: $OLLAMA_KV_CACHE_TYPE"; return 1; }
   if [ -n "$models_dir" ]; then
     validate_absolute_path "$models_dir" || { fail "Invalid Ollama models directory: $models_dir"; return 1; }
   fi
 
   llm_library="$(detect_ollama_llm_library || true)"
-  if [ -n "$llm_library" ] && [ -d "/usr/local/lib/ollama/$llm_library" ]; then
-    llm_library_path="/usr/local/lib/ollama/$llm_library"
+  if [ -n "$llm_library" ] && [ -d "$ollama_lib_dir/$llm_library" ]; then
+    llm_library_path="$ollama_lib_dir/$llm_library"
   fi
 
   write_ollama_gpu_guard_script
@@ -480,7 +517,7 @@ After=network-online.target systemd-modules-load.service nvidia-persistenced.ser
 
 [Service]
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-Environment="LD_LIBRARY_PATH=${llm_library_path}:/usr/local/lib/ollama"
+Environment="LD_LIBRARY_PATH=${llm_library_path}:${ollama_lib_dir}"
 TimeoutStartSec=7min
 Restart=on-failure
 RestartSec=10s
@@ -498,6 +535,8 @@ EOF
   fi
   cat >> /etc/systemd/system/ollama.service.d/override.conf <<EOF
 Environment="OLLAMA_FLASH_ATTENTION=1"
+Environment="OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH}"
+Environment="OLLAMA_KV_CACHE_TYPE=${OLLAMA_KV_CACHE_TYPE}"
 Environment="OLLAMA_GPU_OVERHEAD=268435456"
 Environment="OLLAMA_LOAD_TIMEOUT=10m"
 Environment="OLLAMA_KEEP_ALIVE=30m"
@@ -566,6 +605,8 @@ configure_ollama_service_lan() {
   record_manifest "OLLAMA_OVERRIDE_CREATED" "1"
   record_manifest "OLLAMA_PORT" "$port"
   record_manifest "OLLAMA_BIND_HOST" "$bind_host"
+  record_manifest "OLLAMA_CONTEXT_LENGTH" "$OLLAMA_CONTEXT_LENGTH"
+  record_manifest "OLLAMA_KV_CACHE_TYPE" "$OLLAMA_KV_CACHE_TYPE"
   OLLAMA_PORT="$port"
   OLLAMA_BIND_HOST="$bind_host"
   systemctl daemon-reload
@@ -659,6 +700,8 @@ configure_ollama_models_dir() {
   record_manifest "OLLAMA_OVERRIDE_CREATED" "1"
   record_manifest "OLLAMA_PORT" "$port"
   record_manifest "OLLAMA_BIND_HOST" "$bind_host"
+  record_manifest "OLLAMA_CONTEXT_LENGTH" "$OLLAMA_CONTEXT_LENGTH"
+  record_manifest "OLLAMA_KV_CACHE_TYPE" "$OLLAMA_KV_CACHE_TYPE"
   record_manifest "OLLAMA_MODELS_DIR" "$new_resolved"
   if [ -n "$gpu_uuids" ]; then
     record_manifest "NVIDIA_GPU_UUIDS" "$gpu_uuids"
@@ -976,6 +1019,25 @@ remove_ollama_models_interactive() {
   pause
 }
 
+# True when Ollama already has MODEL (name:tag as shown by `ollama list`).
+ollama_has_model() {
+  curl -fsS --max-time 5 "http://127.0.0.1:${OLLAMA_PORT:-$OLLAMA_PORT_DEFAULT}/api/tags" 2>/dev/null \
+    | jq -e --arg m "$1" '.models | any(.name == $m)' >/dev/null 2>&1
+}
+
+# Pulls MODEL as the AI user, falling back to the current user.
+pull_ollama_model() {
+  local model="$1"
+  local bin
+  bin="$(choose_ollama_binary)" || { fail "Ollama binary not found."; return 1; }
+  echo "Pulling model: $model"
+  if sudo -u "$AI_USER" "$bin" pull "$model"; then
+    return 0
+  fi
+  warn "Pull as ${AI_USER} failed for ${model}; retrying as current user."
+  "$bin" pull "$model"
+}
+
 recommend_and_install_models() {
   header
   if [ "$ASSUME_YES" = "1" ]; then
@@ -1054,6 +1116,13 @@ recommend_and_install_models() {
   echo ""
   echo "Installing: $selected"
   echo ""
+
+  # The small Open WebUI task model (titles, tags, search queries) comes with every set.
+  if ! ollama_has_model "$OPENWEBUI_TASK_MODEL" && [[ " $selected " != *" $OPENWEBUI_TASK_MODEL "* ]]; then
+    selected="$selected $OPENWEBUI_TASK_MODEL"
+    echo "Adding ${OPENWEBUI_TASK_MODEL} for Open WebUI background tasks (about 0.4 GB)."
+    echo ""
+  fi
 
   for m in $selected; do
     echo "Pulling model: $m"
@@ -1137,5 +1206,59 @@ remove_ollama_by_location() {
   rm -f /etc/systemd/system/ollama.service || true
   systemctl daemon-reload || true
 
+  pause
+}
+
+# Context length and K/V cache type for every model Ollama loads.
+tune_ollama_memory() {
+  header
+  load_manifest
+  local current_ctx current_kv context kv ans
+  current_ctx="$(systemctl show ollama -p Environment --value 2>/dev/null | tr ' ' '\n' | sed -n 's/^OLLAMA_CONTEXT_LENGTH=//p')"
+  current_kv="$(systemctl show ollama -p Environment --value 2>/dev/null | tr ' ' '\n' | sed -n 's/^OLLAMA_KV_CACHE_TYPE=//p')"
+  echo "Model memory settings (apply to every model unless a chat or model sets num_ctx):"
+  echo ""
+  echo "  Context length now: ${current_ctx:-Ollama default (4096 on this GPU)}   recommended: ${OLLAMA_CONTEXT_LENGTH_DEFAULT}"
+  echo "  K/V cache now:      ${current_kv:-f16 (Ollama default)}   recommended: ${OLLAMA_KV_CACHE_TYPE_DEFAULT}"
+  echo ""
+  echo "Longer context lets web search results and documents fit in one request, but each"
+  echo "loaded model uses more VRAM. q8_0 halves the K/V cache with negligible quality loss;"
+  echo "q4_0 saves more but can lower answer quality. Keep each model under the free VRAM:"
+  echo "a model that does not fit runs partly on the CPU and becomes much slower."
+  echo ""
+
+  while true; do
+    context="$(ask "Context length (2048-262144)" "$OLLAMA_CONTEXT_LENGTH")"
+    validate_context_length "$context" && break
+    warn "Use a number from 2048 to 262144, for example 8192, 16384 or 32768." >&2
+  done
+  while true; do
+    kv="$(ask "K/V cache type (f16, q8_0, q4_0)" "$OLLAMA_KV_CACHE_TYPE")"
+    validate_kv_cache_type "$kv" && break
+    warn "Use f16, q8_0 or q4_0." >&2
+  done
+
+  if [ "$context" = "$current_ctx" ] && [ "$kv" = "$current_kv" ]; then
+    ok "Ollama already uses these settings."
+    pause
+    return 0
+  fi
+  warn "Applying restarts Ollama: loaded models are unloaded and chats in progress are interrupted."
+  ans="$(confirm_proceed "Apply and restart Ollama yes or no" "yes")"
+  if ! is_yes "$ans"; then
+    warn "Cancelled."
+    pause
+    return 0
+  fi
+
+  OLLAMA_CONTEXT_LENGTH="$context"
+  OLLAMA_KV_CACHE_TYPE="$kv"
+  repair_ollama_service_override
+  if wait_http_ok "http://127.0.0.1:${OLLAMA_PORT:-$OLLAMA_PORT_DEFAULT}/api/tags" 60; then
+    ok "Ollama restarted with context ${context} and K/V cache ${kv}."
+    echo "Check VRAM per model after the next chat in Services > GPU usage."
+  else
+    fail "Ollama does not respond after the restart. Check: journalctl -u ollama -e"
+  fi
   pause
 }

@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="270" viewBox="0 0 760 270" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif">
+  <title>Esquema del ajuste Modo de Llamada a Funciones en un modelo</title>
+  <style>
+    .title { font-size: 14px; font-weight: 600; fill: #1f2937; }
+    .note { font-size: 12px; fill: #6b7280; }
+    .crumb { font-size: 13px; fill: #374151; }
+    .crumbb { font-size: 13px; fill: #1f2937; font-weight: 600; }
+    .card { fill: #ffffff; stroke: #d0d5dd; }
+    .sec { font-size: 12px; fill: #6b7280; font-weight: 600; }
+    .item { font-size: 14px; fill: #1f2937; }
+    .sel { fill: #eff6ff; stroke: #2563eb; }
+    .selt { font-size: 13px; fill: #1e40af; font-weight: 600; }
+    .num { fill: #2563eb; }
+    .numt { font-size: 12px; fill: #ffffff; font-weight: 700; }
+    .leg { font-size: 13px; fill: #1f2937; }
+  </style>
+  <rect x="0.5" y="0.5" width="759" height="269" rx="12" fill="#f8f9fb" stroke="#e5e7eb"/>
+  <text x="24" y="32" class="title">Administración: modelos que usan herramientas</text>
+  <text x="736" y="32" class="note" text-anchor="end">Esquema · textos de Open WebUI 0.11.3</text>
+
+  <circle cx="34" cy="58" r="10" class="num"/><text x="34" y="62" class="numt" text-anchor="middle">1</text>
+  <text x="52" y="63" class="crumb">Espacio de Trabajo  ›  Modelos  ›  (tu modelo)  ›  Editar  ›  </text>
+  <text x="430" y="63" class="crumbb">Parámetros Avanzados</text>
+
+  <rect x="24" y="82" width="712" height="74" rx="10" class="card"/>
+  <text x="44" y="110" class="sec">Modo de Llamada a Funciones (Herramientas)</text>
+  <text x="44" y="138" class="item">Predeterminado</text>
+  <rect x="180" y="118" width="96" height="28" rx="8" class="sel"/>
+  <text x="228" y="137" class="selt" text-anchor="middle">Nativo</text>
+  <circle cx="296" cy="132" r="10" class="num"/><text x="296" y="136" class="numt" text-anchor="middle">2</text>
+
+  <text x="24" y="190" class="leg">Con «Nativo» el modelo llama a las herramientas y al terminal por sí mismo (es el valor por</text>
+  <text x="24" y="210" class="leg">defecto desde Open WebUI 0.10). Úsalo con modelos capaces, como la familia qwen3.5.</text>
+  <text x="24" y="240" class="note">Los modelos muy pequeños (p. ej. qwen2.5:0.5b) sirven para tareas internas, no para usar herramientas.</text>
+</svg>

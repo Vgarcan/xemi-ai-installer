@@ -400,6 +400,34 @@ doctor_check_ollama_gpu_logs() {
   fi
 }
 
+# Context length and K/V cache must match what the manifest records (see ollama-tune).
+doctor_check_ollama_memory() {
+  local env ctx kv
+  env="$(systemctl show ollama -p Environment --value --no-pager 2>/dev/null | tr ' ' '\n' || true)"
+  ctx="$(sed -n 's/^OLLAMA_CONTEXT_LENGTH=//p' <<< "$env")"
+  kv="$(sed -n 's/^OLLAMA_KV_CACHE_TYPE=//p' <<< "$env")"
+  if [ -z "$ctx" ] || [ -z "$kv" ]; then
+    doctor_warn "Ollama context length or K/V cache is not set (Ollama falls back to a 4096 context); run: ollama-tune"
+  elif [ "$ctx" != "$OLLAMA_CONTEXT_LENGTH" ] || [ "$kv" != "$OLLAMA_KV_CACHE_TYPE" ]; then
+    doctor_warn "Ollama runs with context ${ctx} / K/V ${kv}, but the manifest says ${OLLAMA_CONTEXT_LENGTH} / ${OLLAMA_KV_CACHE_TYPE}; run: ollama-tune"
+  else
+    doctor_ok "Ollama context ${ctx} tokens, K/V cache ${kv}"
+  fi
+}
+
+doctor_check_ollama_exposure() {
+  local host
+  host="$(systemctl show ollama -p Environment --value --no-pager 2>/dev/null | tr ' ' '\n' | sed -n 's/^OLLAMA_HOST=//p' || true)"
+  case "${host%:*}" in
+    0.0.0.0|'*'|'')
+      doctor_warn "Ollama listens on all interfaces (the firewall limits it to the LAN). If only Open WebUI uses it, set bind host 127.0.0.1: Ollama > Configure Ollama service for LAN"
+      ;;
+    *)
+      doctor_ok "Ollama listens on ${host}"
+      ;;
+  esac
+}
+
 doctor_check_ollama_models_dir() {
   local env_line
   if [ -z "${OLLAMA_MODELS_DIR:-}" ]; then
@@ -486,10 +514,17 @@ doctor() {
   doctor_check_http "Ollama API" "http://127.0.0.1:${ollama_port}/api/tags"
   doctor_check_ollama_gpu_logs
   doctor_check_ollama_models_dir
+  doctor_check_ollama_memory
+  doctor_check_ollama_exposure
   echo ""
 
   doctor_check_service openwebui
   doctor_check_http "Open WebUI health" "http://127.0.0.1:${webui_port}/health"
+  echo ""
+
+  doctor_check_openwebui_extras
+  doctor_check_https
+  doctor_check_backups
   echo ""
 
   doctor_check_firewall

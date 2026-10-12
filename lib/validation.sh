@@ -69,6 +69,17 @@ validate_version() {
   [[ "$version" != *[[:space:]]* ]]
 }
 
+validate_context_length() {
+  [[ "${1:-}" =~ ^[0-9]+$ ]] && [ "$1" -ge 2048 ] && [ "$1" -le 262144 ]
+}
+
+validate_kv_cache_type() {
+  case "${1:-}" in
+    f16|q8_0|q4_0) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 validate_firewall_zone() {
   [[ "${1:-}" =~ ^[A-Za-z0-9_-]+$ ]]
 }
@@ -84,6 +95,8 @@ validate_runtime_config() {
   fi
   validate_bind_host "$OLLAMA_BIND_HOST" || { echo "Invalid OLLAMA_BIND_HOST: $OLLAMA_BIND_HOST"; return 1; }
   validate_package_spec "$OPENWEBUI_PACKAGE" || { echo "Invalid OPENWEBUI_PACKAGE: $OPENWEBUI_PACKAGE"; return 1; }
+  validate_context_length "$OLLAMA_CONTEXT_LENGTH" || { echo "Invalid OLLAMA_CONTEXT_LENGTH (2048-262144): $OLLAMA_CONTEXT_LENGTH"; return 1; }
+  validate_kv_cache_type "$OLLAMA_KV_CACHE_TYPE" || { echo "Invalid OLLAMA_KV_CACHE_TYPE (f16, q8_0, q4_0): $OLLAMA_KV_CACHE_TYPE"; return 1; }
   if [ -n "$OLLAMA_INSTALL_SHA256" ]; then
     validate_sha256 "$OLLAMA_INSTALL_SHA256" || { echo "Invalid OLLAMA_INSTALL_SHA256: $OLLAMA_INSTALL_SHA256"; return 1; }
   fi

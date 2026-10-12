@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="360" viewBox="0 0 760 360" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif">
+  <title>Esquema del menú Más (+) de la barra del chat</title>
+  <style>
+    .card { fill: #ffffff; stroke: #d0d5dd; }
+    .title { font-size: 14px; font-weight: 600; fill: #1f2937; }
+    .note { font-size: 12px; fill: #6b7280; }
+    .item { font-size: 14px; fill: #374151; }
+    .hl { fill: #eff6ff; stroke: #2563eb; }
+    .btn { fill: #f3f4f6; stroke: #d0d5dd; }
+    .num { fill: #2563eb; }
+    .numt { font-size: 12px; fill: #ffffff; font-weight: 700; }
+    .leg { font-size: 13px; fill: #1f2937; }
+    .legb { font-size: 13px; fill: #1f2937; font-weight: 600; }
+    .lead { stroke: #2563eb; stroke-width: 1.5; fill: none; }
+  </style>
+  <rect x="0.5" y="0.5" width="759" height="359" rx="12" fill="#f8f9fb" stroke="#e5e7eb"/>
+  <text x="24" y="32" class="title">Menú Más (+): documentos y contexto</text>
+  <text x="736" y="32" class="note" text-anchor="end">Esquema · textos de Open WebUI 0.11.3</text>
+
+  <rect x="24" y="52" width="250" height="262" rx="12" class="card"/>
+  <rect x="32" y="60" width="234" height="32" rx="8" class="hl"/>
+  <text x="48" y="81" class="item">Subir Archivos</text>
+  <text x="48" y="117" class="item">Captura</text>
+  <text x="48" y="149" class="item">Adjuntar Página Web</text>
+  <text x="48" y="181" class="item">Adjuntar Archivos</text>
+  <text x="48" y="213" class="item">Adjuntar Notas</text>
+  <rect x="32" y="224" width="234" height="32" rx="8" class="hl"/>
+  <text x="48" y="245" class="item">Adjuntar Conocimiento</text>
+  <text x="48" y="281" class="item">Referenciar Chats</text>
+  <rect x="34" y="322" width="34" height="28" rx="14" class="btn"/>
+  <text x="51" y="341" class="item" text-anchor="middle" font-size="17">+</text>
+
+  <circle cx="300" cy="76" r="10" class="num"/><text x="300" y="80" class="numt" text-anchor="middle">1</text>
+  <path d="M290 76 H268" class="lead"/>
+  <text x="320" y="72" class="legb">Subir Archivos</text>
+  <text x="320" y="92" class="leg">El documento se usa solo en este chat. Tika extrae el texto</text>
+  <text x="320" y="110" class="leg">de PDF, Word, Excel y PowerPoint.</text>
+
+  <circle cx="300" cy="240" r="10" class="num"/><text x="300" y="244" class="numt" text-anchor="middle">2</text>
+  <path d="M290 240 H268" class="lead"/>
+  <text x="320" y="236" class="legb">Adjuntar Conocimiento</text>
+  <text x="320" y="256" class="leg">Usa una colección guardada en Espacio de Trabajo › Conocimiento.</text>
+  <text x="320" y="274" class="leg">Atajo: escribe # en el mensaje y elige la colección.</text>
+
+  <text x="320" y="320" class="note">PDF escaneados e imágenes: se leen con OCR (español e inglés).</text>
+</svg>

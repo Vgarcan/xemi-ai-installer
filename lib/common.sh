@@ -63,6 +63,13 @@ menu_item() {
   printf "  ${GREEN}%2s${NC}) %s\n" "$number" "$text"
 }
 
+menu_group() {
+  local number="$1"
+  local title="$2"
+  local contents="$3"
+  printf "  ${GREEN}%2s${NC}) %-20s ${BLUE}%s${NC}\n" "$number" "$title" "$contents"
+}
+
 ask() {
   local prompt="$1"
   local default="${2:-}"

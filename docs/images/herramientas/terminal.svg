@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="380" viewBox="0 0 760 380" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif">
+  <title>Esquema de un chat usando Open Terminal con el panel de archivos</title>
+  <style>
+    .title { font-size: 14px; font-weight: 600; fill: #1f2937; }
+    .note { font-size: 12px; fill: #6b7280; }
+    .card { fill: #ffffff; stroke: #d0d5dd; }
+    .user { fill: #eef2f7; }
+    .msg { font-size: 13px; fill: #1f2937; }
+    .tool { fill: #111827; }
+    .mono { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; fill: #e5e7eb; }
+    .monoh { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; fill: #93c5fd; }
+    .sec { font-size: 12px; fill: #6b7280; font-weight: 600; }
+    .file { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; fill: #374151; }
+    .line { fill: #e5e7eb; }
+    .num { fill: #2563eb; }
+    .numt { font-size: 12px; fill: #ffffff; font-weight: 700; }
+    .leg { font-size: 13px; fill: #1f2937; }
+    .legb { font-size: 13px; fill: #1f2937; font-weight: 600; }
+    .lead { stroke: #2563eb; stroke-width: 1.5; fill: none; }
+  </style>
+  <rect x="0.5" y="0.5" width="759" height="379" rx="12" fill="#f8f9fb" stroke="#e5e7eb"/>
+  <text x="24" y="32" class="title">Chat con Open Terminal</text>
+  <text x="736" y="32" class="note" text-anchor="end">Esquema · el contenido es un ejemplo</text>
+
+  <!-- chat column -->
+  <rect x="100" y="50" width="390" height="40" rx="14" class="user"/>
+  <text x="116" y="75" class="msg">Cuenta las filas de ventas.csv por mes y dime el total.</text>
+
+  <rect x="24" y="106" width="466" height="104" rx="10" class="tool"/>
+  <text x="38" y="128" class="monoh">▸ run_command</text>
+  <text x="38" y="150" class="mono">$ python3 resumen.py ventas.csv</text>
+  <text x="38" y="170" class="mono">enero 412 · febrero 388 · marzo 455</text>
+  <text x="38" y="190" class="mono">total 1255</text>
+
+  <rect x="24" y="226" width="400" height="10" rx="5" class="line"/>
+  <rect x="24" y="246" width="440" height="10" rx="5" class="line"/>
+  <rect x="24" y="266" width="300" height="10" rx="5" class="line"/>
+
+  <!-- file panel -->
+  <rect x="520" y="50" width="216" height="226" rx="12" class="card"/>
+  <text x="536" y="76" class="sec">Mostrar Archivos</text>
+  <text x="536" y="98" class="note">/var/lib/open-terminal</text>
+  <text x="536" y="128" class="file">ventas.csv</text>
+  <text x="536" y="152" class="file">resumen.py</text>
+  <text x="536" y="176" class="file">informe-marzo.md</text>
+
+  <circle cx="500" cy="158" r="10" class="num"/><text x="500" y="162" class="numt" text-anchor="middle">1</text>
+  <circle cx="728" cy="290" r="10" class="num"/><text x="728" y="294" class="numt" text-anchor="middle">2</text>
+  <path d="M728 280 V270" class="lead"/>
+
+  <circle cx="36" cy="310" r="9" class="num"/><text x="36" y="314" class="numt" text-anchor="middle">1</text>
+  <text x="54" y="314" class="legb">Llamada al terminal:</text>
+  <text x="196" y="314" class="leg">muestra el comando que ejecutó el modelo y su salida. Revísalo.</text>
+  <circle cx="36" cy="338" r="9" class="num"/><text x="36" y="342" class="numt" text-anchor="middle">2</text>
+  <text x="54" y="342" class="legb">Archivos:</text>
+  <text x="124" y="342" class="leg">el espacio de trabajo es compartido por todos los usuarios con acceso.</text>
+  <text x="54" y="364" class="note">Sube tus datos con Subir Archivos o pide al modelo que los cree; no guardes contraseñas aquí.</text>
+</svg>

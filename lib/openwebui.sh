@@ -108,7 +108,7 @@ install_openwebui() {
     return 1
   fi
 
-  write_openwebui_sqlite_compat
+  write_sqlite_compat "$OPENWEBUI_VENV"
 
   if [ ! -e "$OPENWEBUI_DATA_DIR" ]; then
     mkdir -p "$OPENWEBUI_DATA_DIR"
@@ -152,9 +152,10 @@ install_openwebui() {
   pause
 }
 
-write_openwebui_sqlite_compat() {
+write_sqlite_compat() {
+  local venv="$1"
   local site_packages
-  site_packages="$("$OPENWEBUI_VENV/bin/python" -c 'import site; print(site.getsitepackages()[0])')"
+  site_packages="$("$venv/bin/python" -c 'import site; print(site.getsitepackages()[0])')"
   cat > "${site_packages}/sitecustomize.py" <<'EOF'
 try:
     import sys
@@ -181,6 +182,18 @@ XDG_CACHE_HOME=${OPENWEBUI_DATA_DIR}/cache
 HF_HOME=${OPENWEBUI_DATA_DIR}/cache/huggingface
 SENTENCE_TRANSFORMERS_HOME=${OPENWEBUI_DATA_DIR}/cache/sentence-transformers
 TRANSFORMERS_CACHE=${OPENWEBUI_DATA_DIR}/cache/transformers
+# First-start defaults: Open WebUI stores them in its database and ignores these lines afterwards.
+# A missing task model falls back to the chat model, so a server without it keeps working.
+TASK_MODEL=${OPENWEBUI_TASK_MODEL}
+RAG_EMBEDDING_MODEL=${OPENWEBUI_EMBEDDING_MODEL}
+RAG_TOP_K=${OPENWEBUI_RAG_TOP_K}
+ENABLE_RAG_HYBRID_SEARCH=true
+RAG_RERANKING_MODEL=${OPENWEBUI_RERANKING_MODEL}
+RAG_TOP_K_RERANKER=${OPENWEBUI_RAG_TOP_K_RERANKER}
+WEB_SEARCH_RESULT_COUNT=${OPENWEBUI_WEB_SEARCH_RESULT_COUNT}
+WHISPER_MODEL=${OPENWEBUI_WHISPER_MODEL}
+# Read on every start (not stored in the database); empty means detect the language.
+WHISPER_LANGUAGE=$( [ "${OPENWEBUI_WHISPER_LANGUAGE:-$OPENWEBUI_WHISPER_LANGUAGE_DEFAULT}" = "auto" ] || echo "${OPENWEBUI_WHISPER_LANGUAGE:-$OPENWEBUI_WHISPER_LANGUAGE_DEFAULT}")
 EOF
   chmod 640 "$OPENWEBUI_ENV_FILE"
 }
@@ -399,10 +412,17 @@ update_openwebui() {
     safe_rm_rf "$candidate" /opt
     return 1
   fi
-  local saved_venv="$OPENWEBUI_VENV"
-  OPENWEBUI_VENV="$candidate"
-  write_openwebui_sqlite_compat
-  OPENWEBUI_VENV="$saved_venv"
+  write_sqlite_compat "$candidate"
+  # The Chromium web loader needs the Playwright client inside Open WebUI, at Open WebUI's version.
+  if [ "${PLAYWRIGHT_INSTALLED:-}" = "1" ]; then
+    local playwright_version
+    playwright_version="$(owui_playwright_version "$candidate")"
+    if [ -n "$playwright_version" ] && ! playwright_client_install "$candidate" "$playwright_version"; then
+      fail "Could not add the Playwright client to the new Open WebUI; update cancelled."
+      safe_rm_rf "$candidate" /opt
+      return 1
+    fi
+  fi
   chown -R "$AI_USER:$AI_GROUP" "$candidate"
 
   if ! systemctl stop openwebui; then
@@ -439,6 +459,7 @@ update_openwebui() {
   record_manifest "OPENWEBUI_DATA_SNAPSHOT" "$snapshot"
   record_manifest "OPENWEBUI_PACKAGE" "$OPENWEBUI_PACKAGE"
   ok "Open WebUI updated to $(openwebui_package_version)."
+  sync_playwright_with_openwebui || warn "Chromium web loader could not follow the new Playwright version; run tools-update."
   echo "Rollback copy: $previous; data snapshot: $snapshot"
   pause
 }
@@ -469,6 +490,7 @@ rollback_openwebui() {
   remove_manifest_key OPENWEBUI_PREVIOUS_VENV
   remove_manifest_key OPENWEBUI_DATA_SNAPSHOT
   ok "Open WebUI rollback completed."
+  sync_playwright_with_openwebui || warn "Chromium web loader could not follow the restored Playwright version; run tools-update."
 }
 
 openwebui_health_check() {

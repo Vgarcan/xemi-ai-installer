@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="330" viewBox="0 0 760 330" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif">
+  <title>Esquema de una respuesta con búsqueda web y citas</title>
+  <style>
+    .title { font-size: 14px; font-weight: 600; fill: #1f2937; }
+    .note { font-size: 12px; fill: #6b7280; }
+    .user { fill: #eef2f7; }
+    .msg { font-size: 14px; fill: #1f2937; }
+    .status { font-size: 12px; fill: #6b7280; }
+    .line { fill: #e5e7eb; }
+    .chip { fill: #ffffff; stroke: #d0d5dd; }
+    .chipt { font-size: 12px; fill: #374151; }
+    .num { fill: #2563eb; }
+    .numt { font-size: 12px; fill: #ffffff; font-weight: 700; }
+    .leg { font-size: 13px; fill: #1f2937; }
+    .legb { font-size: 13px; fill: #1f2937; font-weight: 600; }
+    .lead { stroke: #2563eb; stroke-width: 1.5; fill: none; }
+  </style>
+  <rect x="0.5" y="0.5" width="759" height="329" rx="12" fill="#f8f9fb" stroke="#e5e7eb"/>
+  <text x="24" y="32" class="title">Respuesta con Búsqueda Web</text>
+  <text x="736" y="32" class="note" text-anchor="end">Esquema · el contenido es un ejemplo</text>
+
+  <rect x="300" y="50" width="436" height="40" rx="14" class="user"/>
+  <text x="318" y="75" class="msg">¿Qué cambia en la última versión de AlmaLinux?</text>
+
+  <text x="24" y="118" class="status">✓ Búsqueda en la web completada · 5 resultados</text>
+  <rect x="24" y="132" width="560" height="10" rx="5" class="line"/>
+  <rect x="24" y="152" width="610" height="10" rx="5" class="line"/>
+  <rect x="24" y="172" width="520" height="10" rx="5" class="line"/>
+  <rect x="24" y="192" width="430" height="10" rx="5" class="line"/>
+
+  <rect x="24" y="218" width="150" height="28" rx="14" class="chip"/>
+  <text x="99" y="237" class="chipt" text-anchor="middle">1 · almalinux.org</text>
+  <rect x="182" y="218" width="170" height="28" rx="14" class="chip"/>
+  <text x="267" y="237" class="chipt" text-anchor="middle">2 · wiki.almalinux.org</text>
+  <rect x="360" y="218" width="130" height="28" rx="14" class="chip"/>
+  <text x="425" y="237" class="chipt" text-anchor="middle">+3 fuentes</text>
+
+  <circle cx="530" cy="232" r="10" class="num"/><text x="530" y="236" class="numt" text-anchor="middle">1</text>
+  <path d="M520 232 H496" class="lead"/>
+  <text x="550" y="228" class="legb">Citas</text>
+  <text x="550" y="246" class="leg">Púlsalas para abrir la fuente.</text>
+
+  <text x="24" y="282" class="leg">Comprueba siempre las fuentes en temas importantes: el modelo resume lo que encontró,</text>
+  <text x="24" y="302" class="leg">y puede equivocarse o mezclar resultados.</text>
+</svg>
