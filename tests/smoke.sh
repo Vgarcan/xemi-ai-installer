@@ -264,6 +264,18 @@ assert_rejected doctor
 [ "$(mcp_catalog_field wikipedia 2)" = "wikipedia-mcp" ]
 [ "$(printf '%s\n' $(mcp_catalog_field wikipedia 4) | jq -R . | jq -s -c .)" = '["--language","es"]' ]
 assert_rejected mcp_catalog_field nosuchserver 2
+# Open Terminal: its venv comes first on PATH, so the model's python3 has the Office libraries.
+(
+  mkdir -p "$TEST_DIR/units"
+  eval "$(declare -f write_extra_service | sed "s#/etc/systemd/system/#$TEST_DIR/units/#")"
+  eval "$(declare -f write_extra_hardening | sed "s#/etc/systemd/system/#$TEST_DIR/units/#")"
+  backup_path() { :; }
+  write_open_terminal_service 9000
+  grep -qx "Environment=PATH=${OPEN_TERMINAL_VENV}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin" "$TEST_DIR/units/open-terminal.service"
+  grep -qx "EnvironmentFile=${OPEN_TERMINAL_ENV_FILE}" "$TEST_DIR/units/open-terminal.service"
+  grep -q -- "--port 9000 " "$TEST_DIR/units/open-terminal.service"
+  [[ " $OPEN_TERMINAL_OFFICE_PACKAGES " = *" python-docx "* ]]
+)
 # mcpo installed without extra servers: removal and update must not trip over set -u.
 (
   unset MCP_EXTRA_SERVERS

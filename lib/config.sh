@@ -69,6 +69,8 @@ OPEN_TERMINAL_VENV="/opt/open-terminal-venv"
 OPEN_TERMINAL_HOME="/var/lib/open-terminal"
 OPEN_TERMINAL_ENV_FILE="${CONFIG_DIR}/open-terminal.env"
 OPEN_TERMINAL_PORT_DEFAULT="8000"
+# Python in the terminal: Word, Excel, PowerPoint and PDF files the model creates and shows in the chat.
+OPEN_TERMINAL_OFFICE_PACKAGES="python-docx openpyxl python-pptx reportlab"
 MCPO_VENV="/opt/mcpo-venv"
 MCPO_CONFIG_DIR="/etc/mcpo"
 MCPO_ENV_FILE="${CONFIG_DIR}/mcpo.env"
